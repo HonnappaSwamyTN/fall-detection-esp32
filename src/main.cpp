@@ -32,7 +32,6 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
-#include <secrets.h>
 
 
 // ============================================================
@@ -62,6 +61,27 @@
 #define ACCEL_XOUT_H      0x3B
 #define GYRO_XOUT_H       0x43
 
+
+// ============================================================
+// WIFI SETTINGS
+// ============================================================
+
+// Put your own credentials here.
+// DO NOT upload this file containing real credentials to GitHub.
+
+const char* WIFI_SSID     = "YOUR_WIFI_SSID";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+
+
+// ============================================================
+// TELEGRAM SETTINGS
+// ============================================================
+
+// Generate a NEW Telegram bot token because the previous one
+// was exposed.
+
+const char* BOT_TOKEN = "YOUR_NEW_BOT_TOKEN";
+const char* CHAT_ID   = "YOUR_CHAT_ID";
 
 
 // ============================================================
