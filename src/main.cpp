@@ -32,6 +32,9 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
+#include <WebServer.h>
+#include <DNSServer.h>
 
 
 // ============================================================
@@ -63,25 +66,15 @@
 
 
 // ============================================================
-// WIFI SETTINGS
+// DYNAMIC CREDENTIALS & PREFERENCES
 // ============================================================
 
-// Put your own credentials here.
-// DO NOT upload this file containing real credentials to GitHub.
+Preferences preferences;
 
-const char* WIFI_SSID     = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-
-
-// ============================================================
-// TELEGRAM SETTINGS
-// ============================================================
-
-// Generate a NEW Telegram bot token because the previous one
-// was exposed.
-
-const char* BOT_TOKEN = "YOUR_NEW_BOT_TOKEN";
-const char* CHAT_ID   = "YOUR_CHAT_ID";
+String wifiSSID     = "";
+String wifiPassword = "";
+String botToken     = "";
+String chatID       = "";
 
 
 // ============================================================
@@ -98,10 +91,10 @@ const char* CHAT_ID   = "YOUR_CHAT_ID";
 // MPU6050 SCALE
 // ============================================================
 
-// Accelerometer: ±2g
-// 16384 LSB = 1g
+// Accelerometer: ±8g
+// 4096 LSB = 1g
 
-#define ACCEL_SCALE 16384.0
+#define ACCEL_SCALE 4096.0
 
 // Gyroscope: ±250 degrees/second
 // 131 LSB = 1 degree/second
@@ -348,6 +341,185 @@ bool mpuReadAccelGyro(
 
 
 // ============================================================
+// PROTOTYPES
+// ============================================================
+
+void resetToMonitoring();
+void connectWiFi();
+void maintainWiFiConnection();
+void sendTelegramAlert();
+bool loadCredentials();
+void saveCredentials(const String& ssid, const String& pass, const String& token, const String& chat);
+void clearCredentials();
+void startProvisioningPortal();
+
+
+// ============================================================
+// PREFERENCES & PROVISIONING MANAGER
+// ============================================================
+
+bool loadCredentials()
+{
+  preferences.begin("fall_config", true);
+  wifiSSID     = preferences.getString("ssid", "");
+  wifiPassword = preferences.getString("password", "");
+  botToken     = preferences.getString("bot_token", "");
+  chatID       = preferences.getString("chat_id", "");
+  preferences.end();
+
+  return (wifiSSID.length() > 0 && botToken.length() > 0 && chatID.length() > 0);
+}
+
+void saveCredentials(const String& ssid, const String& pass, const String& token, const String& chat)
+{
+  preferences.begin("fall_config", false);
+  preferences.putString("ssid", ssid);
+  preferences.putString("password", pass);
+  preferences.putString("bot_token", token);
+  preferences.putString("chat_id", chat);
+  preferences.end();
+}
+
+void clearCredentials()
+{
+  preferences.begin("fall_config", false);
+  preferences.clear();
+  preferences.end();
+}
+
+
+// ============================================================
+// PROVISIONING WEB SERVER & CAPTIVE PORTAL
+// ============================================================
+
+DNSServer dnsServer;
+WebServer webServer(80);
+
+const char PROGMEM SETUP_HTML[] = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fall Detector Setup</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #121212; color: #fff; margin: 0; padding: 20px; display: flex; justify-content: center; }
+    .card { background: #1e1e1e; padding: 24px; border-radius: 12px; width: 100%; max-width: 400px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+    h2 { text-align: center; color: #00e676; margin-top: 0; }
+    label { font-size: 14px; font-weight: bold; margin-top: 12px; display: block; color: #b0bec5; }
+    input[type="text"], input[type="password"] { width: 100%; padding: 10px; margin-top: 6px; border: 1px solid #333; border-radius: 6px; background: #2a2a2a; color: #fff; box-sizing: border-box; }
+    input[type="submit"] { width: 100%; padding: 12px; margin-top: 24px; border: none; border-radius: 6px; background: #00e676; color: #000; font-weight: bold; font-size: 16px; cursor: pointer; }
+    input[type="submit"]:hover { background: #00c853; }
+    .note { font-size: 12px; color: #888; margin-top: 15px; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Fall Detector Setup</h2>
+    <form action="/save" method="POST">
+      <label for="ssid">Wi-Fi Network Name (SSID)</label>
+      <input type="text" id="ssid" name="ssid" required placeholder="Your Wi-Fi SSID">
+      
+      <label for="pass">Wi-Fi Password</label>
+      <input type="password" id="pass" name="pass" placeholder="Your Wi-Fi Password">
+      
+      <label for="token">Telegram Bot Token</label>
+      <input type="text" id="token" name="token" required placeholder="123456789:ABCdef...">
+      
+      <label for="chat">Telegram Chat ID</label>
+      <input type="text" id="chat" name="chat" required placeholder="123456789">
+      
+      <input type="submit" value="Save & Restart">
+    </form>
+    <div class="note">Device will reboot automatically after saving.</div>
+  </div>
+</body>
+</html>
+)rawliteral";
+
+void handleRoot()
+{
+  webServer.send(200, "text/html", SETUP_HTML);
+}
+
+void handleSave()
+{
+  if (webServer.hasArg("ssid") && webServer.hasArg("token") && webServer.hasArg("chat"))
+  {
+    String reqSSID  = webServer.arg("ssid");
+    String reqPass  = webServer.arg("pass");
+    String reqToken = webServer.arg("token");
+    String reqChat  = webServer.arg("chat");
+
+    reqSSID.trim();
+    reqPass.trim();
+    reqToken.trim();
+    reqChat.trim();
+
+    saveCredentials(reqSSID, reqPass, reqToken, reqChat);
+
+    String resp = "<html><body style='font-family:sans-serif;background:#121212;color:#00e676;text-align:center;padding:50px;'>";
+    resp += "<h2>Settings Saved Successfully!</h2><p style='color:#fff;'>Device is restarting and connecting to Wi-Fi...</p></body></html>";
+
+    webServer.send(200, "text/html", resp);
+    delay(2000);
+    ESP.restart();
+  }
+  else
+  {
+    webServer.send(400, "text/plain", "Bad Request: Missing required fields");
+  }
+}
+
+void startProvisioningPortal()
+{
+  Serial.println();
+  Serial.println("==========================================");
+  Serial.println("   STARTING PROVISIONING SETUP PORTAL   ");
+  Serial.println("==========================================");
+  Serial.println("Broadcasting SoftAP: FallDetector-Setup");
+  Serial.println("Connect your phone/PC to 'FallDetector-Setup'");
+  Serial.println("Open browser at http://192.168.4.1 if portal does not open automatically.");
+  Serial.println("==========================================");
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("FallDetector-Setup");
+
+  IPAddress apIP = WiFi.softAPIP();
+  Serial.print("Access Point IP: ");
+  Serial.println(apIP);
+
+  dnsServer.start(53, "*", apIP);
+
+  webServer.on("/", HTTP_GET, handleRoot);
+  webServer.on("/save", HTTP_POST, handleSave);
+  webServer.onNotFound([]() {
+    webServer.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true);
+    webServer.send(302, "text/plain", "");
+  });
+
+  webServer.begin();
+
+  unsigned long lastBlink = 0;
+  bool ledState = false;
+
+  while (true)
+  {
+    dnsServer.processNextRequest();
+    webServer.handleClient();
+
+    if (millis() - lastBlink > 500)
+    {
+      lastBlink = millis();
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+    }
+
+    delay(5);
+  }
+}
+
+
+// ============================================================
 // SETUP
 // ============================================================
 
@@ -374,14 +546,67 @@ void setup()
   digitalWrite(LED_PIN, LOW);
 
 
-  // ==========================================================
-  // START I2C
-  // ==========================================================
-
   Serial.println();
   Serial.println("==============================");
   Serial.println("Fall Detection System");
   Serial.println("==============================");
+
+  // ==========================================================
+  // CHECK RESET BUTTON ON BOOT
+  // ==========================================================
+  if (digitalRead(BUTTON_PIN) == LOW)
+  {
+    Serial.println("Reset button pressed during startup.");
+    Serial.println("Hold button for 3 seconds to clear saved credentials...");
+
+    unsigned long pressStart = millis();
+    bool resetTriggered = false;
+
+    while (digitalRead(BUTTON_PIN) == LOW)
+    {
+      if (millis() - pressStart >= 3000)
+      {
+        resetTriggered = true;
+        break;
+      }
+      delay(50);
+    }
+
+    if (resetTriggered)
+    {
+      Serial.println("Reset confirmed! Clearing credentials and starting setup portal...");
+
+      for (int i = 0; i < 10; i++)
+      {
+        digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+        delay(100);
+      }
+      digitalWrite(LED_PIN, LOW);
+
+      clearCredentials();
+      startProvisioningPortal();
+    }
+    else
+    {
+      Serial.println("Button released early. Continuing normal startup.");
+    }
+  }
+
+  // ==========================================================
+  // LOAD SAVED CREDENTIALS
+  // ==========================================================
+  if (!loadCredentials())
+  {
+    Serial.println("No saved credentials found in NVS.");
+    Serial.println("Launching setup portal...");
+    startProvisioningPortal();
+  }
+
+  Serial.println("Credentials loaded from NVS successfully.");
+
+  // ==========================================================
+  // START I2C
+  // ==========================================================
 
   Serial.println("Initializing I2C...");
 
@@ -478,9 +703,9 @@ void setup()
   // ACCELEROMETER CONFIGURATION
   // ==========================================================
 
-  // 0x00 = ±2g
+  // 0x10 = ±8g (allows measuring impacts up to 78.4 m/s² without saturation)
 
-  if (!mpuWriteRegister(ACCEL_CONFIG, 0x00))
+  if (!mpuWriteRegister(ACCEL_CONFIG, 0x10))
   {
     Serial.println("WARNING: Accelerometer configuration failed.");
   }
@@ -523,6 +748,9 @@ void setup()
 
 void loop()
 {
+  // Non-blocking background Wi-Fi auto-recovery
+  maintainWiFiConnection();
+
   // ==========================================================
   // READ SENSOR
   // ==========================================================
@@ -630,7 +858,8 @@ void loop()
 
         stateStartTime = millis();
 
-        rotationConfirmed = false;
+        // Check if rotation signature is already present at the moment of impact
+        rotationConfirmed = (gyroMag > ROTATION_THRESHOLD);
       }
 
       break;
@@ -750,12 +979,12 @@ void loop()
 
 
         // ====================================================
-        // FIND MIN/MAX
+        // CALCULATE MIN, MAX, AND MEAN ACCELERATION
         // ====================================================
 
         float minVal = accelBuffer[0];
-
         float maxVal = accelBuffer[0];
+        float sumVal = accelBuffer[0];
 
 
         for (int i = 1; i < bufferIndex; i++)
@@ -771,19 +1000,30 @@ void loop()
           {
             maxVal = accelBuffer[i];
           }
+
+          sumVal += accelBuffer[i];
         }
 
 
-        float variation =
-          maxVal - minVal;
+        float variation = maxVal - minVal;
+        float avgAccel  = sumVal / bufferIndex;
 
 
         Serial.print(
-          "Post-impact acceleration variation: "
+          "Post-impact variation: "
         );
 
         Serial.print(
           variation,
+          2
+        );
+
+        Serial.print(
+          " m/s^2 | Avg acceleration: "
+        );
+
+        Serial.print(
+          avgAccel,
           2
         );
 
@@ -792,11 +1032,14 @@ void loop()
 
         // ====================================================
         // FALL CONFIRMED
+        // Stillness confirmed if movement variation is low AND
+        // average acceleration magnitude is near 1g gravity (7.0 to 12.5 m/s²)
         // ====================================================
 
         if (
-          variation <
-          INACTIVITY_VARIATION_MAX
+          (variation < INACTIVITY_VARIATION_MAX)
+          &&
+          (avgAccel >= 7.0f && avgAccel <= 12.5f)
         )
         {
 
@@ -824,7 +1067,7 @@ void loop()
         {
 
           Serial.println(
-            "Movement continued."
+            "Movement continued or unstable resting position."
           );
 
           Serial.println(
@@ -974,15 +1217,16 @@ void connectWiFi()
   Serial.println();
 
   Serial.print(
-    "Connecting to Wi-Fi"
+    "Connecting to Wi-Fi network: "
   );
+  Serial.println(wifiSSID);
 
 
   WiFi.mode(WIFI_STA);
 
   WiFi.begin(
-    WIFI_SSID,
-    WIFI_PASSWORD
+    wifiSSID.c_str(),
+    wifiPassword.c_str()
   );
 
 
@@ -992,7 +1236,7 @@ void connectWiFi()
   while (
     WiFi.status() != WL_CONNECTED
     &&
-    attempts < 20
+    attempts < 30
   )
   {
 
@@ -1013,7 +1257,7 @@ void connectWiFi()
   {
 
     Serial.println(
-      "Wi-Fi connected."
+      "Wi-Fi connected successfully."
     );
 
 
@@ -1029,16 +1273,36 @@ void connectWiFi()
   {
 
     Serial.println(
-      "Wi-Fi connection failed."
+      "Wi-Fi connection failed or timed out."
     );
 
     Serial.println(
-      "Fall detection will still work."
+      "Fall detection will operate LOCALLY (Buzzer & LED active)."
     );
 
     Serial.println(
       "Telegram alerts will be unavailable."
     );
+  }
+}
+
+
+// ============================================================
+// NON-BLOCKING WIFI RECOVERY
+// ============================================================
+
+unsigned long lastWiFiReconnectAttempt = 0;
+
+void maintainWiFiConnection()
+{
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    if (millis() - lastWiFiReconnectAttempt >= 30000)
+    {
+      lastWiFiReconnectAttempt = millis();
+      Serial.println("Wi-Fi disconnected. Triggering background reconnect...");
+      WiFi.reconnect();
+    }
   }
 }
 
@@ -1082,7 +1346,9 @@ void sendTelegramAlert()
   WiFiClientSecure client;
 
   // For prototype/testing.
-  // Production version should use certificate validation.
+  // PRODUCTION SECURITY NOTE: For production deployment, replace client.setInsecure()
+  // with Telegram root CA certificate validation: client.setCACert(TELEGRAM_ROOT_CA_CERT)
+  // to prevent Man-in-the-Middle (MITM) network attacks.
 
   client.setInsecure();
 
@@ -1096,7 +1362,7 @@ void sendTelegramAlert()
 
   String url =
     "https://api.telegram.org/bot"
-    + String(BOT_TOKEN)
+    + botToken
     + "/sendMessage";
 
 
@@ -1131,7 +1397,7 @@ void sendTelegramAlert()
 
   String payload =
     "{\"chat_id\":\""
-    + String(CHAT_ID)
+    + chatID
     + "\",\"text\":\""
     + "FALL DETECTED! Immediate attention may be required."
     + "\"}";
