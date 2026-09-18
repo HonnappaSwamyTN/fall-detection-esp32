@@ -1,0 +1,16 @@
+1. Can our model prevent the fall itself from happening? NO. Honestly, that's not even the point. We are devising this model because people will fall and that has to be detected.
+2. Can our model revoke the sent signal if the person has fallen down and is fine? If esp32 doesn't need a push button for switching on and off, i.e., if it can work independently on given code, what is needed for us to revoke that signal? Push buttons are impossible, or what's a better alternative to that?
+3. What are the conditions for falling? How is that recorded?
+4. How are we going to get all the data from just 4 project members?
+5. What is the battery life of the model? It can't be supported forever just by a lithium battery(which is only being used for our presentation) that needs to be charged later on through charging module, and has to be opened for that...
+6. Arms are not a good idea and the calibration for all values must be taken wrt to the body and not the ground. If the reference is body wrt ground, then it would be perfect. But different body parts move at different speeds and accelerations at the same time, which is hard to get all together, which is not actually needed here. 
+7. If waist is chosen, different people have different falling speeds or different waist structures or different muscle tensions in body. What's the best way to take all that into consideration?
+8. Can we include gps modules, since esp32 doesn't even have it, to locate the falling person?
+9. What would we do if there was no wifi at that moment? 
+10. What if the person is on a wheel chair?
+11. How long must the buzzer be on for? 
+12. What is the person falls near the hip and before it can send a signal, the machine is only destroyed, what then?
+13. What about normal journeys here and there.... It's most important for people to wear it when they are out of home as well, but what about on a journey? Is it that gyro and accelero combo should be rapid speed and distance to ground plus no response time together... Then only it'll detect ? What is the gaadi is moving too quick and it stops... Or maybe that's dumb
+14. Why can't there be a status of all components from time to time so people know when to get something replaced instead of the buying the whole machine again
+15. It should be waterproof definitely, idk what materials they use to make it so
+16. What is the diff of acc in moving and not moving?
