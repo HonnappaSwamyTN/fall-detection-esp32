@@ -33,6 +33,10 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 
+void connectWiFi();
+void resetToMonitoring();
+void sendTelegramAlert();
+
 
 // ============================================================
 // PIN DEFINITIONS
@@ -69,8 +73,8 @@
 // Put your own credentials here.
 // DO NOT upload this file containing real credentials to GitHub.
 
-const char* WIFI_SSID     = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char* WIFI_SSID     = "HomeNetwork";
+const char* WIFI_PASSWORD = "homeWifi@123";
 
 
 // ============================================================
@@ -80,8 +84,8 @@ const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 // Generate a NEW Telegram bot token because the previous one
 // was exposed.
 
-const char* BOT_TOKEN = "YOUR_NEW_BOT_TOKEN";
-const char* CHAT_ID   = "YOUR_CHAT_ID";
+const char* BOT_TOKEN = "8876478020:AAEFV3k9zaJ5DfR51G7v2_MGw_RzMLCuPpM";
+const char* CHAT_ID   = "8551358483";
 
 
 // ============================================================
@@ -117,23 +121,25 @@ const char* CHAT_ID   = "YOUR_CHAT_ID";
 // These are starting values.
 // They MUST be calibrated using real sensor data.
 
-#define IMPACT_ACCEL_THRESHOLD     25.0
+// More realistic starting values for a wearable device.
+// Lower than the original settings so a real fall is less likely to be missed.
+#define IMPACT_ACCEL_THRESHOLD     15.0
 
 // rad/s
-#define ROTATION_THRESHOLD         4.0
+#define ROTATION_THRESHOLD         2.0
 
 // Time after impact during which rotation is checked
-#define ROTATION_CHECK_MS          500
+#define ROTATION_CHECK_MS          700
 
 
 // How long post-impact movement is monitored
-#define INACTIVITY_WINDOW_MS       2000
+#define INACTIVITY_WINDOW_MS       2500
 
 // Sampling interval
 #define INACTIVITY_SAMPLE_MS       100
 
 // Maximum acceleration variation considered "still"
-#define INACTIVITY_VARIATION_MAX   1.5
+#define INACTIVITY_VARIATION_MAX   2.2
 
 
 // ============================================================
@@ -227,7 +233,11 @@ bool mpuReadRegister(uint8_t reg, uint8_t &value)
     return false;
   }
 
-  uint8_t received = Wire.requestFrom(MPU_ADDR, (uint8_t)1, true);
+  uint8_t received = Wire.requestFrom(
+    (uint8_t)MPU_ADDR,
+    (uint8_t)1,
+    (uint8_t)true
+  );
 
   if (received != 1 || !Wire.available())
   {
@@ -284,9 +294,9 @@ bool mpuReadAccelGyro(
   // Total         = 14 bytes
 
   uint8_t received = Wire.requestFrom(
-    MPU_ADDR,
+    (uint8_t)MPU_ADDR,
     (uint8_t)14,
-    true
+    (uint8_t)true
   );
 
 
@@ -355,7 +365,14 @@ void setup()
 {
   Serial.begin(115200);
 
-  delay(1000);
+  unsigned long serialWaitStart = millis();
+
+  while (!Serial && millis() - serialWaitStart < 5000)
+  {
+    delay(10);
+  }
+
+  delay(2000);
 
 
   // ==========================================================
@@ -441,9 +458,9 @@ void setup()
   Serial.println(whoAmI, HEX);
 
 
-  if (whoAmI != 0x68)
+  if (whoAmI != 0x68 && whoAmI != 0x70)
   {
-    Serial.println("ERROR: Device identity does not match MPU6050.");
+    Serial.println("ERROR: Device identity does not match MPU6050/MPU6500-compatible IMU.");
 
     while (1)
     {
@@ -452,7 +469,14 @@ void setup()
   }
 
 
-  Serial.println("MPU6050 identity verified.");
+  if (whoAmI == 0x70)
+  {
+    Serial.println("Detected MPU6500-compatible sensor.");
+  }
+  else
+  {
+    Serial.println("MPU6050 identity verified.");
+  }
 
 
   // ==========================================================
@@ -506,7 +530,6 @@ void setup()
   // ==========================================================
 
   connectWiFi();
-
 
   Serial.println();
   Serial.println("==============================");
@@ -992,7 +1015,7 @@ void connectWiFi()
   while (
     WiFi.status() != WL_CONNECTED
     &&
-    attempts < 20
+    attempts < 40
   )
   {
 
@@ -1093,6 +1116,8 @@ void sendTelegramAlert()
   // ==========================================================
   // TELEGRAM API URL
   // ==========================================================
+  // IMPORTANT: BOT_TOKEN must be your real Telegram bot token.
+  // Example format: "123456:ABCDEF..."
 
   String url =
     "https://api.telegram.org/bot"
@@ -1124,10 +1149,14 @@ void sendTelegramAlert()
     "application/json"
   );
 
+  https.setTimeout(15000);
+
 
   // ==========================================================
   // JSON MESSAGE
   // ==========================================================
+  // Use your personal chat ID for a private chat.
+  // For a group, use the group chat ID (usually starts with -100).
 
   String payload =
     "{\"chat_id\":\""
