@@ -32,6 +32,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include "secrets.h"
 
 void connectWiFi();
 void resetToMonitoring();
@@ -70,22 +71,9 @@ void sendTelegramAlert();
 // WIFI SETTINGS
 // ============================================================
 
-// Put your own credentials here.
-// DO NOT upload this file containing real credentials to GitHub.
-
-const char* WIFI_SSID     = "HomeNetwork";
-const char* WIFI_PASSWORD = "homeWifi@123";
-
-
 // ============================================================
 // TELEGRAM SETTINGS
 // ============================================================
-
-// Generate a NEW Telegram bot token because the previous one
-// was exposed.
-
-const char* BOT_TOKEN = "8876478020:AAEFV3k9zaJ5DfR51G7v2_MGw_RzMLCuPpM";
-const char* CHAT_ID   = "8551358483";
 
 
 // ============================================================
