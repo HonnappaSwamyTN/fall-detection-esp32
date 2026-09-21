@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "author": "Honnappa Swamy",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-c3-devkitm-1", "id": "esp", "top": -0.3, "left": -3.78, "attrs": {} },
+    { "type": "wokwi-led", "id": "led1", "top": -42, "left": 90.2, "attrs": { "color": "red" } },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "btn1",
+      "top": 156,
+      "left": -28.6,
+      "rotate": 180,
+      "attrs": { "color": "green", "xray": "1" }
+    },
+    {
+      "type": "wokwi-buzzer",
+      "id": "bz1",
+      "top": 163.2,
+      "left": 67.2,
+      "rotate": 180,
+      "attrs": { "volume": "0.1" }
+    },
+    {
+      "type": "wokwi-mpu6050",
+      "id": "imu1",
+      "top": 89.38,
+      "left": 108.52,
+      "rotate": 270,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r1",
+      "top": 51.4,
+      "left": 75.95,
+      "rotate": 270,
+      "attrs": { "value": "220" }
+    }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "esp:GND.6", "imu1:GND", "black", [ "v-0.3", "h14.14", "v-57.6", "h124.8", "h-67.2" ] ],
+    [ "esp:GND.6", "bz1:1", "black", [ "v-0.3", "h14.14", "h28.8" ] ],
+    [ "esp:GND.6", "led1:A", "black", [ "v-0.3", "h27.52", "v-134.1" ] ],
+    [ "esp:GND.6", "btn1:1.l", "black", [ "h-1.28", "v9.6", "h-38.4", "v28.8" ] ],
+    [ "esp:3V3.2", "imu1:VCC", "red", [ "h-13.38", "v-28.8", "h138.18" ] ],
+    [ "esp:4", "imu1:SDA", "green", [ "v-0.3", "h52.54", "h96" ] ],
+    [ "esp:5", "imu1:SCL", "green", [ "h42.94", "v-0.3", "h76.8", "h-48" ] ],
+    [ "r1:2", "led1:C", "green", [ "v0" ] ],
+    [ "esp:10", "btn1:1.r", "blue", [ "v-0.3", "h-38.4", "v77.1" ] ],
+    [ "esp:7", "r1:1", "purple", [ "h0" ] ],
+    [ "esp:6", "bz1:2", "gold", [ "h8.32" ] ]
+  ],
+  "dependencies": {}
+}
