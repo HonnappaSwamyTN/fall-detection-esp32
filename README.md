@@ -42,7 +42,7 @@ If a potential fall is detected, the buzzer and LED activate and a Telegram noti
 <h4>Virtual diagram image</h4><br>
   <img src="images/wokwi-circuit.png" width="800"><br><br>
 
-<a href="https://www.google.com">WOKWI</a>
+<a href="https://wokwi.com/projects/475755215160551425">WOKWI</a>
 
 ## Project Status
 
