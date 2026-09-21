@@ -35,6 +35,15 @@ Impact → Rotation → Inactivity → Alert
 
 If a potential fall is detected, the buzzer and LED activate and a Telegram notification is sent when Wi-Fi is available.
 
+## Wokwi Simulation
+
+### Circuit Diagram
+
+<h4>Virtual diagram image</h4><br>
+  <img src="images/wokwi-circuit.png" width="800"><br><br>
+
+<a href="https://www.google.com">WOKWI</a>
+
 ## Project Status
 
 Currently under development and testing.
