@@ -3,4 +3,7 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Local credentials. Keep real Wi-Fi and Telegram values out of Git.
 include/secrets.h
+.env
