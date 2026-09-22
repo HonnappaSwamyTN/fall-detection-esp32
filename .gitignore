@@ -7,3 +7,8 @@
 # Local credentials. Keep real Wi-Fi and Telegram values out of Git.
 include/secrets.h
 .env
+backend/.env
+backend/events.db
+*.db
+__pycache__/
+*.pyc

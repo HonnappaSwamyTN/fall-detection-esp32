@@ -1,15 +1,15 @@
 import os
 import json
-import uuid
 import logging
-import html
-from typing import Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, status
+from typing import Dict, Any, Optional, List
+from fastapi import FastAPI, HTTPException, status, Query
 from pydantic import BaseModel, Field
 import httpx
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+
+import database
 
 # Configure Logging
 logging.basicConfig(
@@ -20,10 +20,13 @@ logging.basicConfig(
 # Load Environment Variables from .env file
 load_dotenv()
 
+# Initialize SQLite Database on startup
+database.init_db()
+
 app = FastAPI(
     title="ESP32-C3 Fall Detection AI Backend",
-    description="Lightweight backend service integrating Gemini AI analysis and Telegram Caregiver Alerts for fall events",
-    version="1.0.0"
+    description="Lightweight backend service integrating SQLite Event Storage, Gemini AI analysis, and Telegram Caregiver Alerts",
+    version="2.0.0"
 )
 
 # ============================================================
@@ -49,6 +52,9 @@ class FallEventResponse(BaseModel):
     status: str
     telegram_delivered: bool
     gemini_assessment: Dict[str, Any]
+
+class EventHistoryResponse(BaseModel):
+    events: List[Dict[str, Any]]
 
 # ============================================================
 # GEMINI API HELPER
@@ -96,7 +102,6 @@ def analyze_fall_with_gemini(event: FallEventRequest, override_api_key: Optional
     - Return ONLY a valid JSON object matching the requested schema.
     """
 
-    # Model fallback order: gemini-2.5-flash, gemini-1.5-flash
     models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash"]
     last_exception = None
 
@@ -138,7 +143,6 @@ def send_telegram_alert(event: FallEventRequest, assessment: Dict[str, Any], ove
         logging.warning("[TELEGRAM] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID unconfigured. Skipping Telegram dispatch.")
         return False
 
-    # Mask token/chat in logs to prevent leaking secrets
     masked_chat = f"...{chat_id[-4:]}" if len(chat_id) >= 4 else "masked"
     logging.info(f"[TELEGRAM] Request started for chat ID '{masked_chat}'")
 
@@ -146,7 +150,6 @@ def send_telegram_alert(event: FallEventRequest, assessment: Dict[str, Any], ove
     severity = str(assessment.get("severity", "HIGH")).upper()
     severity_emoji = "🔴" if severity in ["HIGH", "CRITICAL"] else "🟡"
 
-    # Robust Plain-Text Message (Avoids fragile Markdown parse failures)
     message = (
         f"🚨 POTENTIAL FALL ALERT DETECTED 🚨\n\n"
         f"Device ID: {event.device_id}\n"
@@ -205,20 +208,65 @@ def health_check():
 def process_fall_event(event: FallEventRequest):
     logging.info(f"Received fall event payload from device '{event.device_id}' (Impact: {event.impact_g:.2f}g)")
 
-    event_id = str(uuid.uuid4())
+    # 1. Store Raw Fall Event in SQLite first
+    db_event_id = database.insert_raw_event(
+        device_id=event.device_id,
+        timestamp=event.timestamp,
+        impact_g=event.impact_g,
+        rotation_rads=event.rotation_rads,
+        posture_change_deg=event.posture_change_deg,
+        stillness_variation=event.stillness_variation,
+        fall_confidence=event.fall_confidence
+    )
 
-    # 1. Gemini AI Kinematic Analysis
+    # 2. Run Gemini AI Assessment (or fallback)
     assessment = analyze_fall_with_gemini(event)
 
-    # 2. Telegram Alert Dispatch
+    # 3. Update Database with Gemini Result
+    database.update_event_gemini(
+        event_id=db_event_id,
+        severity=assessment.get("severity", "UNKNOWN"),
+        assessment=assessment.get("assessment", ""),
+        caregiver_message=assessment.get("caregiver_message", ""),
+        recommended_action=assessment.get("recommended_action", ""),
+        alert_status="assessed"
+    )
+
+    # 4. Dispatch Telegram Alert
     telegram_delivered = send_telegram_alert(event, assessment)
 
+    # 5. Update Database with Telegram Status
+    alert_status = "alert_sent" if telegram_delivered else "alert_failed_or_skipped"
+    database.update_event_telegram(
+        event_id=db_event_id,
+        telegram_delivered=telegram_delivered,
+        alert_status=alert_status
+    )
+
     return FallEventResponse(
-        event_id=event_id,
+        event_id=str(db_event_id),
         status="processed",
         telegram_delivered=telegram_delivered,
         gemini_assessment=assessment
     )
+
+@app.get("/api/events", response_model=EventHistoryResponse)
+def get_event_history(
+    limit: int = Query(default=50, ge=1, le=100, description="Maximum number of events to return (1-100)"),
+    device_id: Optional[str] = Query(default=None, description="Optional filter by device ID")
+):
+    events = database.get_events(limit=limit, device_id=device_id)
+    return EventHistoryResponse(events=events)
+
+@app.get("/api/events/{event_id}")
+def get_single_event(event_id: int):
+    event_record = database.get_event_by_id(event_id)
+    if not event_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Fall event with ID {event_id} not found"
+        )
+    return event_record
 
 if __name__ == "__main__":
     import uvicorn
