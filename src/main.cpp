@@ -5,10 +5,12 @@
   Features:
   - Raw I2C communication with MPU6050
   - 50Hz non-blocking IMU sampling
-  - Impact detection
-  - Gyroscope rotation signature verification
-  - Post-impact inactivity evaluation
-  - Posture & orientation tilt-shift verification (dynamic baseline)
+  - Free-fall weightlessness detection (< 0.51g)
+  - Impact spike detection (> 1.53g)
+  - Gyroscope rotation signature verification (> 2.0 rad/s)
+  - Post-impact inactivity evaluation (variance < 2.2 m/s^2)
+  - Posture & orientation tilt-shift verification (> 35 deg shift)
+  - Dynamic multi-factor Fall Confidence Scoring (0.00 to 1.00)
   - 10-second PRE_ALERT grace period with pulsing audio/visual alarm
   - Manual button cancellation during PRE_ALERT (prevents all network alerts)
   - Non-blocking HTTP POST payload to Python FastAPI Backend API
@@ -64,20 +66,24 @@
 // ============================================================
 // SAMPLING & THRESHOLD CONSTANTS
 // ============================================================
-#define SENSOR_SAMPLE_INTERVAL_MS  20   // ~50 Hz sampling rate
+#define SENSOR_SAMPLE_INTERVAL_MS  20     // ~50 Hz non-blocking loop ticker
 
-// Fall Kinematics Thresholds
-#define IMPACT_ACCEL_THRESHOLD     15.0f  // m/s^2 (~1.53g impact)
-#define ROTATION_THRESHOLD         2.0f   // rad/s
-#define ROTATION_CHECK_MS          700    // Window for rotation verification
-#define INACTIVITY_WINDOW_MS       2500   // Post-impact stillness monitoring
-#define INACTIVITY_VARIATION_MAX   2.2f   // Max variance allowed for "still"
-#define POSTURE_TILT_COS_MAX       0.819f // cos(35 deg) -> tilt shift > 35 degrees
+// Kinematic Thresholds & Timing Windows
+#define FREEFALL_ACCEL_THRESHOLD   5.0f   // m/s^2 (< 0.51g) weightlessness threshold
+#define FREEFALL_WINDOW_MS         500    // Max ms before impact to register free-fall
+
+#define IMPACT_ACCEL_THRESHOLD     15.0f  // m/s^2 (> 1.53g) peak impact threshold
+#define ROTATION_THRESHOLD         2.0f   // rad/s (> ~115 deg/s) angular velocity threshold
+#define ROTATION_CHECK_MS          700    // Max ms after impact to confirm rotation
+
+#define INACTIVITY_WINDOW_MS       2500   // Post-impact stillness sampling window (ms)
+#define INACTIVITY_VARIATION_MAX   2.2f   // Max post-impact acceleration variance for stillness
+#define POSTURE_TILT_COS_MAX       0.819f // cos(35 deg): orientation tilt change > 35 degrees
 
 // Alert & Cooldown Durations
-#define PRE_ALERT_HOLD_MS          10000  // 10-second user cancel grace window
-#define ALERT_HOLD_MS              5000   // Hold active alert state duration
-#define FALL_COOLDOWN_MS           10000  // Cooldown before next fall detection
+#define PRE_ALERT_HOLD_MS          10000  // 10-second user cancellation grace period
+#define ALERT_HOLD_MS              5000   // Active alert indication duration (ms)
+#define FALL_COOLDOWN_MS           10000  // Cooldown before returning to MONITORING (ms)
 
 // Inactivity Buffer
 #define BUFFER_SIZE 50
@@ -96,12 +102,17 @@ float snapshotBaselineAx = 0.0f;
 float snapshotBaselineAy = 0.0f;
 float snapshotBaselineAz = 9.80665f;
 
+// Free-fall Tracking State
+unsigned long lastFreefallTime = 0;
+bool freefallDetected = false;
+
 // Captured Kinematic Telemetry for Backend POST Payload
 float capturedImpactG = 0.0f;
 float capturedRotationRads = 0.0f;
 float capturedPostureChangeDeg = 0.0f;
 float capturedStillnessVariation = 0.0f;
-float capturedFallConfidence = 0.95f;
+float capturedFallConfidence = 0.0f;
+bool capturedFreefallPresent = false;
 
 // ============================================================
 // SYSTEM STATE
@@ -133,7 +144,7 @@ String botToken     = "";
 String chatID       = "";
 String backendURL   = "";
 
-// Debug Toggle (1 = print sensor values, 0 = silence telemetry)
+// Debug Toggle (1 = print sensor values every 20ms, 0 = print state transitions only)
 #define DEBUG_SENSOR 0
 
 // ============================================================
@@ -145,6 +156,7 @@ void maintainWiFiConnection();
 void triggerAlertDispatch();
 void sendBackendFallEvent();
 void sendTelegramAlertFallback();
+float calculateFallConfidence(float impactG, float rotationRads, float stillnessVar, float tiltDeg, bool freefallPresent);
 bool loadCredentials();
 void saveCredentials(const String& ssid, const String& pass, const String& token, const String& chat, const String& backend);
 void clearCredentials();
@@ -418,6 +430,7 @@ void resetToMonitoring() {
   currentState = MONITORING;
   rotationConfirmed = false;
   alertDispatched = false;
+  freefallDetected = false;
   bufferIndex = 0;
 }
 
@@ -468,7 +481,7 @@ void setup() {
 
   Serial.println();
   Serial.println("==========================================");
-  Serial.println("  ESP32-C3 Fall Detection System (v3.0)  ");
+  Serial.println("  ESP32-C3 Fall Detection System (v4.0)  ");
   Serial.println("==========================================");
 
   // Check boot reset button
@@ -602,6 +615,41 @@ void maintainWiFiConnection() {
 }
 
 // ============================================================
+// DYNAMIC FALL CONFIDENCE CALCULATION
+// ============================================================
+float calculateFallConfidence(float impactG, float rotationRads, float stillnessVar, float tiltDeg, bool freefallPresent) {
+  // 1. Impact Strength Score (Max 0.30)
+  // Baseline threshold = 1.53g (15.0 m/s^2). Full 0.30 score at >= 6.0g
+  float sImpact = (impactG / 6.0f) * 0.30f;
+  if (sImpact > 0.30f) sImpact = 0.30f;
+
+  // 2. Rotation Velocity Score (Max 0.25)
+  // Baseline threshold = 2.0 rad/s (~115 deg/s). Full 0.25 score at >= 6.0 rad/s
+  float sRotation = (rotationRads / 6.0f) * 0.25f;
+  if (sRotation > 0.25f) sRotation = 0.25f;
+
+  // 3. Stillness & Inactivity Score (Max 0.20)
+  // Max variation threshold = 2.2 m/s^2. Lower variation -> higher score
+  float sStillness = 0.20f * (1.0f - (stillnessVar / INACTIVITY_VARIATION_MAX));
+  if (sStillness < 0.05f) sStillness = 0.05f;
+  if (sStillness > 0.20f) sStillness = 0.20f;
+
+  // 4. Posture Orientation Shift Score (Max 0.20)
+  // Full 0.20 score at >= 90 deg tilt shift (going from vertical upright to horizontal flat)
+  float sTilt = (tiltDeg / 90.0f) * 0.20f;
+  if (sTilt > 0.20f) sTilt = 0.20f;
+
+  // 5. Free-fall Weightlessness Bonus (Max 0.05)
+  float sFreefall = freefallPresent ? 0.05f : 0.00f;
+
+  float totalConfidence = sImpact + sRotation + sStillness + sTilt + sFreefall;
+  if (totalConfidence < 0.0f) totalConfidence = 0.0f;
+  if (totalConfidence > 1.0f) totalConfidence = 1.0f;
+
+  return totalConfidence;
+}
+
+// ============================================================
 // ALERT DISPATCH (HTTP POST TO FASTAPI BACKEND)
 // ============================================================
 void triggerAlertDispatch() {
@@ -713,13 +761,19 @@ void processSensorStep() {
 
   unsigned long now = millis();
 
-  // Baseline Posture Update (during resting state in MONITORING)
+  // Baseline Posture Update & Free-fall Tracking (during MONITORING)
   if (currentState == MONITORING) {
+    // 1. Posture baseline update during resting state
     if (accelMag >= 6.86f && accelMag <= 12.75f) {
-      // Exponential moving average filter
       baselineAx = baselineAx * 0.95f + ax * 0.05f;
       baselineAy = baselineAy * 0.95f + ay * 0.05f;
       baselineAz = baselineAz * 0.95f + az * 0.05f;
+    }
+
+    // 2. Free-fall weightlessness detection (< 5.0 m/s^2 or < 0.51g)
+    if (accelMag < FREEFALL_ACCEL_THRESHOLD) {
+      lastFreefallTime = now;
+      freefallDetected = true;
     }
   }
 
@@ -733,21 +787,29 @@ void processSensorStep() {
     // --------------------------------------------------------
     case MONITORING:
       if (accelMag > IMPACT_ACCEL_THRESHOLD) {
+        // Check if free-fall occurred within the recent timing window before impact
+        bool recentFreefall = freefallDetected && (now - lastFreefallTime <= FREEFALL_WINDOW_MS);
+
         Serial.println();
         Serial.println("==========================================");
         Serial.println("  !!! HIGH IMPACT DETECTED !!!");
         Serial.print("  Impact Peak: ");
         Serial.print(accelMag, 2);
-        Serial.println(" m/s^2");
+        Serial.print(" m/s^2 (");
+        Serial.print(accelMag / 9.80665f, 2);
+        Serial.println("g)");
+        Serial.print("  Free-fall Evidence: ");
+        Serial.println(recentFreefall ? "YES" : "NO");
         Serial.println("==========================================");
 
-        // Snapshot kinematic measurements
+        // Snapshot kinematic measurements & baseline
         snapshotBaselineAx = baselineAx;
         snapshotBaselineAy = baselineAy;
         snapshotBaselineAz = baselineAz;
 
         capturedImpactG = accelMag / 9.80665f;
         capturedRotationRads = gyroMag;
+        capturedFreefallPresent = recentFreefall;
 
         currentState = ROTATION_CHECK;
         stateStartTime = now;
@@ -850,11 +912,22 @@ void processSensorStep() {
           // Store captured telemetry
           capturedPostureChangeDeg = postureShiftDeg;
           capturedStillnessVariation = variation;
-          capturedFallConfidence = 0.95f;
+
+          // Calculate Dynamic Multi-Factor Fall Confidence Score (0.00 to 1.00)
+          capturedFallConfidence = calculateFallConfidence(
+            capturedImpactG,
+            capturedRotationRads,
+            capturedStillnessVariation,
+            capturedPostureChangeDeg,
+            capturedFreefallPresent
+          );
 
           Serial.println();
           Serial.println("==========================================");
           Serial.println("  !!! POTENTIAL FALL CONFIRMED !!!");
+          Serial.print("  Calculated Fall Confidence: ");
+          Serial.print(capturedFallConfidence * 100.0f, 1);
+          Serial.println("%");
           Serial.println("  Starting 10-Second Grace Period (PRE_ALERT)...");
           Serial.println("  Press button to cancel alert.");
           Serial.println("==========================================");
