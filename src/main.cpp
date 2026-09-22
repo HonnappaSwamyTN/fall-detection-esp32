@@ -13,9 +13,11 @@
   - Dynamic multi-factor Fall Confidence Scoring (0.00 to 1.00)
   - 10-second PRE_ALERT grace period with pulsing audio/visual alarm
   - Manual button cancellation during PRE_ALERT (prevents all network alerts)
+  - Non-blocking, standalone Wi-Fi auto-reconnection state management
+  - Battery-powered standalone operation without USB Serial dependence
   - Non-blocking HTTP POST payload to Python FastAPI Backend API
   - Configurable Backend API URL via NVS Preferences & secrets.h fallback
-  - Provisioning portal via NVS Preferences
+  - Provisioning portal via NVS Preferences & SoftAP
   - I2C error checking & MPU6050 WHO_AM_I verification
   - Fall cooldown timer
 
@@ -85,6 +87,9 @@
 #define ALERT_HOLD_MS              5000   // Active alert indication duration (ms)
 #define FALL_COOLDOWN_MS           10000  // Cooldown before returning to MONITORING (ms)
 
+// Wi-Fi Reconnect Settings
+#define WIFI_RECONNECT_INTERVAL_MS 15000  // Background Wi-Fi reconnect retry interval (ms)
+
 // Inactivity Buffer
 #define BUFFER_SIZE 50
 float accelMagBuffer[BUFFER_SIZE];
@@ -115,7 +120,7 @@ float capturedFallConfidence = 0.0f;
 bool capturedFreefallPresent = false;
 
 // ============================================================
-// SYSTEM STATE
+// SYSTEM STATE & WIFI STATE
 // ============================================================
 enum SystemState {
   MONITORING,
@@ -126,12 +131,21 @@ enum SystemState {
   COOLDOWN
 };
 
+enum WiFiState {
+  WIFI_STATE_DISCONNECTED,
+  WIFI_STATE_CONNECTING,
+  WIFI_STATE_CONNECTED
+};
+
 SystemState currentState = MONITORING;
+WiFiState currentWiFiState = WIFI_STATE_DISCONNECTED;
 
 // State Timing & Variables
 unsigned long stateStartTime = 0;
 unsigned long lastSensorSampleTime = 0;
 unsigned long lastPreAlertPulseTime = 0;
+unsigned long lastWiFiReconnectAttempt = 0;
+
 bool preAlertPulseState = false;
 bool rotationConfirmed = false;
 bool alertDispatched = false;
@@ -144,7 +158,7 @@ String botToken     = "";
 String chatID       = "";
 String backendURL   = "";
 
-// Debug Toggle (1 = print sensor values every 20ms, 0 = print state transitions only)
+// Debug Toggle (1 = print raw sensor values every 20ms, 0 = print state transitions only)
 #define DEBUG_SENSOR 0
 
 // ============================================================
@@ -464,12 +478,14 @@ void handleButtonPress() {
 // ============================================================
 void setup() {
   Serial.begin(115200);
+
+  // Short 1-second bounded wait for USB Serial (non-blocking for battery power)
   unsigned long serialWaitStart = millis();
-  while (!Serial && millis() - serialWaitStart < 3000) {
+  while (!Serial && millis() - serialWaitStart < 1000) {
     delay(10);
   }
 
-  delay(1000);
+  delay(500);
 
   // GPIO Setup
   pinMode(BUZZER_PIN, OUTPUT);
@@ -481,7 +497,7 @@ void setup() {
 
   Serial.println();
   Serial.println("==========================================");
-  Serial.println("  ESP32-C3 Fall Detection System (v4.0)  ");
+  Serial.println("  ESP32-C3 Standalone Fall Detector (v4C)");
   Serial.println("==========================================");
 
   // Check boot reset button
@@ -564,7 +580,7 @@ void setup() {
   mpuWriteRegister(GYRO_CONFIG, 0x00);
   Serial.println("MPU6050 configured successfully.");
 
-  // Wi-Fi Connection
+  // Initiate Wi-Fi Connection (Bounded boot attempt)
   connectWiFi();
 
   Serial.println();
@@ -574,41 +590,51 @@ void setup() {
 }
 
 // ============================================================
-// WIFI CONNECTION & MAINTENANCE
+// WIFI CONNECTION & AUTOMATIC RECONNECTION STATE MACHINE
 // ============================================================
 void connectWiFi() {
-  Serial.println();
-  Serial.print("Connecting to Wi-Fi: ");
-  Serial.println(wifiSSID);
-
+  Serial.println("[WIFI] Connecting to saved network...");
   WiFi.mode(WIFI_STA);
   WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+  currentWiFiState = WIFI_STATE_CONNECTING;
 
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    delay(500);
-    Serial.print(".");
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(250);
     attempts++;
   }
-  Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("Wi-Fi Connected! IP Address: ");
+    currentWiFiState = WIFI_STATE_CONNECTED;
+    Serial.print("[WIFI] Connected. IP: ");
     Serial.println(WiFi.localIP());
   } else {
-    Serial.println("Wi-Fi connection failed/timed out.");
-    Serial.println("System will operate in LOCAL ALARM mode.");
+    currentWiFiState = WIFI_STATE_DISCONNECTED;
+    Serial.println("[WIFI] Initial connection attempt timed out.");
+    Serial.println("[WIFI] Operating in standalone LOCAL mode; background reconnect active.");
   }
 }
 
-unsigned long lastWiFiReconnectAttempt = 0;
-
 void maintainWiFiConnection() {
-  if (WiFi.status() != WL_CONNECTED) {
+  wl_status_t status = WiFi.status();
+
+  if (status == WL_CONNECTED) {
+    if (currentWiFiState != WIFI_STATE_CONNECTED) {
+      currentWiFiState = WIFI_STATE_CONNECTED;
+      Serial.print("[WIFI] Reconnected. IP: ");
+      Serial.println(WiFi.localIP());
+    }
+  } else {
+    if (currentWiFiState == WIFI_STATE_CONNECTED) {
+      currentWiFiState = WIFI_STATE_DISCONNECTED;
+      Serial.println("[WIFI] Connection lost.");
+    }
+
     unsigned long now = millis();
-    if (now - lastWiFiReconnectAttempt >= 30000) {
+    if (now - lastWiFiReconnectAttempt >= WIFI_RECONNECT_INTERVAL_MS) {
       lastWiFiReconnectAttempt = now;
-      Serial.println("[WIFI] Disconnected. Triggering background reconnect...");
+      currentWiFiState = WIFI_STATE_CONNECTING;
+      Serial.println("[WIFI] Reconnect attempt...");
       WiFi.reconnect();
     }
   }
@@ -619,23 +645,19 @@ void maintainWiFiConnection() {
 // ============================================================
 float calculateFallConfidence(float impactG, float rotationRads, float stillnessVar, float tiltDeg, bool freefallPresent) {
   // 1. Impact Strength Score (Max 0.30)
-  // Baseline threshold = 1.53g (15.0 m/s^2). Full 0.30 score at >= 6.0g
   float sImpact = (impactG / 6.0f) * 0.30f;
   if (sImpact > 0.30f) sImpact = 0.30f;
 
   // 2. Rotation Velocity Score (Max 0.25)
-  // Baseline threshold = 2.0 rad/s (~115 deg/s). Full 0.25 score at >= 6.0 rad/s
   float sRotation = (rotationRads / 6.0f) * 0.25f;
   if (sRotation > 0.25f) sRotation = 0.25f;
 
   // 3. Stillness & Inactivity Score (Max 0.20)
-  // Max variation threshold = 2.2 m/s^2. Lower variation -> higher score
   float sStillness = 0.20f * (1.0f - (stillnessVar / INACTIVITY_VARIATION_MAX));
   if (sStillness < 0.05f) sStillness = 0.05f;
   if (sStillness > 0.20f) sStillness = 0.20f;
 
   // 4. Posture Orientation Shift Score (Max 0.20)
-  // Full 0.20 score at >= 90 deg tilt shift (going from vertical upright to horizontal flat)
   float sTilt = (tiltDeg / 90.0f) * 0.20f;
   if (sTilt > 0.20f) sTilt = 0.20f;
 
@@ -659,7 +681,7 @@ void triggerAlertDispatch() {
 
 void sendBackendFallEvent() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[HTTP] Alert POST skipped: Wi-Fi not connected.");
+    Serial.println("[BACKEND] Network unavailable; event will not be sent yet.");
     sendTelegramAlertFallback();
     return;
   }
@@ -670,7 +692,7 @@ void sendBackendFallEvent() {
   HTTPClient http;
   http.begin(backendURL);
   http.addHeader("Content-Type", "application/json");
-  http.setTimeout(5000); // 5-second timeout to prevent freezing loop
+  http.setTimeout(5000); // Bounded 5-second timeout to prevent freezing loop
 
   unsigned long currentSeconds = millis() / 1000;
   char timeBuf[32];
@@ -1006,6 +1028,7 @@ void processSensorStep() {
 // MAIN LOOP
 // ============================================================
 void loop() {
+  // Non-blocking Wi-Fi maintenance state ticker
   maintainWiFiConnection();
 
   // Continuous non-blocking button polling
