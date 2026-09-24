@@ -33,23 +33,35 @@
             </div>
         </header>
 
-        <!-- DEVICE STATUS BAR -->
-        <section class="status-grid">
-            <div class="status-card">
-                <span class="status-label">Device</span>
-                <span id="status-device" class="status-value highlight-cyan">ESP32C3_01</span>
-            </div>
-            <div class="status-card">
-                <span class="status-label">Backend</span>
-                <span id="status-backend" class="status-value state-offline">OFFLINE</span>
-            </div>
-            <div class="status-card">
-                <span class="status-label">Last Event</span>
-                <span id="status-lastevent" class="status-value">--</span>
-            </div>
-            <div class="status-card">
-                <span class="status-label">Database</span>
-                <span id="status-database" class="status-value state-offline">DISCONNECTED</span>
+        <!-- SYSTEM STATUS GRID -->
+        <section class="section-container">
+            <h2 class="section-title">System Status & Health Diagnostics</h2>
+            <div class="status-grid">
+                <div class="status-card">
+                    <span class="status-label">Backend</span>
+                    <span id="status-backend" class="status-value state-offline">🔴 OFFLINE</span>
+                    <span id="status-backend-sub" class="status-subtext" title="Checking status...">Connecting...</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">Gemini AI</span>
+                    <span id="status-gemini" class="status-value state-warning">🟡 CONFIGURED</span>
+                    <span id="status-gemini-sub" class="status-subtext" title="Status: Not recently tested">Status: Not recently tested</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">Telegram Alert</span>
+                    <span id="status-telegram" class="status-value state-warning">🟡 CONFIGURED</span>
+                    <span id="status-telegram-sub" class="status-subtext" title="Status: Not recently tested">Status: Not recently tested</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">Database</span>
+                    <span id="status-database" class="status-value state-offline">🔴 DISCONNECTED</span>
+                    <span id="status-database-sub" class="status-subtext" title="SQLite Storage Status">SQLite Database Connected</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">Wearable Device</span>
+                    <span id="status-wearable" class="status-value state-warning">🟡 NEVER CONNECTED</span>
+                    <span id="status-wearable-sub" class="status-subtext" title="ESP32C3_01 Heartbeat Status">Awaiting first heartbeat ping</span>
+                </div>
             </div>
         </section>
 

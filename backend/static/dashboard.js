@@ -12,9 +12,10 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 async function fetchDashboardData() {
-    await checkHealthStatus();
-    await fetchLatestEvent();
-    await fetchEventHistory();
+    try { await checkHealthStatus(); } catch (e) { console.error("Health check error:", e); }
+    try { await fetchDeviceStatus(); } catch (e) { console.error("Device status error:", e); }
+    try { await fetchLatestEvent(); } catch (e) { console.error("Latest event error:", e); }
+    try { await fetchEventHistory(); } catch (e) { console.error("Event history error:", e); }
 }
 
 /**
@@ -23,7 +24,9 @@ async function fetchDashboardData() {
 async function checkHealthStatus() {
     const backendBadge = document.getElementById("backend-badge");
     const statusBackend = document.getElementById("status-backend");
+    const statusBackendSub = document.getElementById("status-backend-sub");
     const statusDatabase = document.getElementById("status-database");
+    const statusDatabaseSub = document.getElementById("status-database-sub");
 
     try {
         const response = await fetch("/health", { cache: "no-store" });
@@ -31,15 +34,36 @@ async function checkHealthStatus() {
             const data = await response.json();
             if (data.status === "ok") {
                 // Header badge
-                backendBadge.className = "badge badge-online";
-                backendBadge.innerHTML = '<span class="dot"></span> BACKEND ONLINE';
+                if (backendBadge) {
+                    backendBadge.className = "badge badge-online";
+                    backendBadge.innerHTML = '<span class="dot"></span> BACKEND ONLINE';
+                }
 
-                // Status card values
-                statusBackend.textContent = "ONLINE";
-                statusBackend.className = "status-value state-online";
+                // Backend card
+                if (statusBackend) {
+                    statusBackend.textContent = "🟢 ONLINE";
+                    statusBackend.className = "status-value state-online";
+                }
+                if (statusBackendSub) {
+                    statusBackendSub.textContent = "HTTP 200 OK";
+                    statusBackendSub.title = "FastAPI service active on /health";
+                }
 
-                statusDatabase.textContent = "CONNECTED";
-                statusDatabase.className = "status-value state-online";
+                // Database card
+                if (statusDatabase) {
+                    statusDatabase.textContent = data.database_connected ? "🟢 ONLINE" : "🔴 OFFLINE";
+                    statusDatabase.className = data.database_connected ? "status-value state-online" : "status-value state-offline";
+                }
+                if (statusDatabaseSub) {
+                    statusDatabaseSub.textContent = data.database_connected ? "SQLite Storage Connected" : "Database Error";
+                }
+
+                // Gemini card
+                updateGeminiUI(data.gemini_status, data.gemini_last_error, data.gemini_last_success_time);
+
+                // Telegram card
+                updateTelegramUI(data.telegram_status, data.telegram_last_error, data.telegram_last_success_time);
+
                 return;
             }
         }
@@ -49,19 +73,204 @@ async function checkHealthStatus() {
     }
 }
 
+/**
+ * Fetch real-time device heartbeat status via GET /api/device/status
+ */
+async function fetchDeviceStatus() {
+    const statusWearable = document.getElementById("status-wearable");
+    const statusWearableSub = document.getElementById("status-wearable-sub");
+
+    try {
+        const response = await fetch("/api/device/status?device_id=ESP32C3_01", { cache: "no-store" });
+        if (!response.ok) return;
+
+        const data = await response.json();
+        const devId = data.device_id || "ESP32C3_01";
+
+        if (data.status === "online") {
+            if (statusWearable) {
+                statusWearable.textContent = "🟢 ONLINE";
+                statusWearable.className = "status-value state-online";
+            }
+            if (statusWearableSub) {
+                const sec = data.seconds_since_last_seen != null ? data.seconds_since_last_seen : 0;
+                const rssiInfo = data.wifi_rssi != null ? ` (RSSI: ${data.wifi_rssi} dBm)` : "";
+                statusWearableSub.textContent = `Last seen: ${sec}s ago${rssiInfo}`;
+                statusWearableSub.title = `Device '${devId}' heartbeat active (${sec}s ago)`;
+            }
+        } else if (data.status === "offline") {
+            if (statusWearable) {
+                statusWearable.textContent = "🔴 OFFLINE";
+                statusWearable.className = "status-value state-offline";
+            }
+            if (statusWearableSub) {
+                const sec = data.seconds_since_last_seen != null ? data.seconds_since_last_seen : 30;
+                const ageStr = formatDuration(sec);
+                statusWearableSub.textContent = `Last seen: ${ageStr} ago`;
+                statusWearableSub.title = `Device '${devId}' offline. No heartbeat received for ${ageStr}`;
+            }
+        } else {
+            // never_connected
+            if (statusWearable) {
+                statusWearable.textContent = "🟡 NEVER CONNECTED";
+                statusWearable.className = "status-value state-warning";
+            }
+            if (statusWearableSub) {
+                statusWearableSub.textContent = "Awaiting first heartbeat ping";
+                statusWearableSub.title = `Device '${devId}' has not sent any heartbeat yet`;
+            }
+        }
+    } catch (err) {
+        console.error("Error fetching device status:", err);
+    }
+}
+
+function formatDuration(sec) {
+    if (sec < 60) return `${sec}s`;
+    const mins = Math.floor(sec / 60);
+    const remSec = sec % 60;
+    if (mins < 60) return `${mins}m ${remSec}s`;
+    const hours = Math.floor(mins / 60);
+    return `${hours}h ${mins % 60}m`;
+}
+
 function setBackendOffline() {
     const backendBadge = document.getElementById("backend-badge");
     const statusBackend = document.getElementById("status-backend");
+    const statusBackendSub = document.getElementById("status-backend-sub");
+
+    const statusGemini = document.getElementById("status-gemini");
+    const statusGeminiSub = document.getElementById("status-gemini-sub");
+
+    const statusTelegram = document.getElementById("status-telegram");
+    const statusTelegramSub = document.getElementById("status-telegram-sub");
+
     const statusDatabase = document.getElementById("status-database");
+    const statusDatabaseSub = document.getElementById("status-database-sub");
 
-    backendBadge.className = "badge badge-offline";
-    backendBadge.innerHTML = '<span class="dot"></span> BACKEND OFFLINE';
+    const statusWearable = document.getElementById("status-wearable");
+    const statusWearableSub = document.getElementById("status-wearable-sub");
 
-    statusBackend.textContent = "OFFLINE";
-    statusBackend.className = "status-value state-offline";
+    if (backendBadge) {
+        backendBadge.className = "badge badge-offline";
+        backendBadge.innerHTML = '<span class="dot"></span> BACKEND OFFLINE';
+    }
 
-    statusDatabase.textContent = "DISCONNECTED";
-    statusDatabase.className = "status-value state-offline";
+    if (statusBackend) {
+        statusBackend.textContent = "🔴 OFFLINE";
+        statusBackend.className = "status-value state-offline";
+    }
+    if (statusBackendSub) {
+        statusBackendSub.textContent = "Unreachable (Server Stopped)";
+        statusBackendSub.title = "Failed to connect to FastAPI /health";
+    }
+
+    if (statusDatabase) {
+        statusDatabase.textContent = "🔴 OFFLINE";
+        statusDatabase.className = "status-value state-offline";
+    }
+    if (statusDatabaseSub) {
+        statusDatabaseSub.textContent = "Backend Unreachable";
+    }
+
+    if (statusWearable) {
+        statusWearable.textContent = "🔴 UNKNOWN";
+        statusWearable.className = "status-value state-offline";
+    }
+    if (statusWearableSub) {
+        statusWearableSub.textContent = "Backend Offline";
+        statusWearableSub.title = "Backend is unreachable";
+    }
+
+    if (statusGemini) {
+        statusGemini.textContent = "🔴 UNKNOWN";
+        statusGemini.className = "status-value state-offline";
+    }
+    if (statusGeminiSub) {
+        statusGeminiSub.textContent = "Backend Offline";
+        statusGeminiSub.title = "Backend is unreachable";
+    }
+
+    if (statusTelegram) {
+        statusTelegram.textContent = "🔴 UNKNOWN";
+        statusTelegram.className = "status-value state-offline";
+    }
+    if (statusTelegramSub) {
+        statusTelegramSub.textContent = "Backend Offline";
+        statusTelegramSub.title = "Backend is unreachable";
+    }
+}
+
+function updateGeminiUI(status, lastError, lastSuccessTime) {
+    const el = document.getElementById("status-gemini");
+    const sub = document.getElementById("status-gemini-sub");
+    if (!el || !sub) return;
+
+    if (status === "not_configured") {
+        el.textContent = "🟡 NOT CONFIGURED";
+        el.className = "status-value state-warning";
+        const msg = lastError || "GEMINI_API_KEY is not configured";
+        sub.textContent = msg;
+        sub.title = msg;
+    } else if (status === "configured") {
+        el.textContent = "🟡 CONFIGURED";
+        el.className = "status-value state-warning";
+        sub.textContent = "Status: Not recently tested";
+        sub.title = "GEMINI_API_KEY is set. Awaiting first event assessment.";
+    } else if (status === "working" || status === "success") {
+        el.textContent = "🟢 WORKING";
+        el.className = "status-value state-online";
+        const tsMsg = lastSuccessTime ? ` (${formatTimestamp(lastSuccessTime)})` : "";
+        sub.textContent = "Last request successful" + tsMsg;
+        sub.title = "Last Gemini AI assessment succeeded" + tsMsg;
+    } else if (status === "error") {
+        el.textContent = "🔴 ERROR";
+        el.className = "status-value state-offline";
+        const reason = lastError || "Gemini request failed";
+        sub.textContent = "Reason: " + reason;
+        sub.title = "Reason: " + reason;
+    } else {
+        el.textContent = "🟡 CONFIGURED";
+        el.className = "status-value state-warning";
+        sub.textContent = "Status: Not recently tested";
+        sub.title = "Status: Not recently tested";
+    }
+}
+
+function updateTelegramUI(status, lastError, lastSuccessTime) {
+    const el = document.getElementById("status-telegram");
+    const sub = document.getElementById("status-telegram-sub");
+    if (!el || !sub) return;
+
+    if (status === "not_configured") {
+        el.textContent = "🟡 NOT CONFIGURED";
+        el.className = "status-value state-warning";
+        const msg = lastError || "TELEGRAM_BOT_TOKEN or CHAT_ID unconfigured";
+        sub.textContent = msg;
+        sub.title = msg;
+    } else if (status === "configured") {
+        el.textContent = "🟡 CONFIGURED";
+        el.className = "status-value state-warning";
+        sub.textContent = "Status: Not recently tested";
+        sub.title = "Telegram credentials set. Awaiting first fall alert.";
+    } else if (status === "delivered" || status === "success") {
+        el.textContent = "🟢 DELIVERED";
+        el.className = "status-value state-online";
+        const tsMsg = lastSuccessTime ? ` (${formatTimestamp(lastSuccessTime)})` : "";
+        sub.textContent = "Last delivery successful" + tsMsg;
+        sub.title = "Last Telegram alert delivered successfully" + tsMsg;
+    } else if (status === "failed" || status === "error") {
+        el.textContent = "🔴 FAILED";
+        el.className = "status-value state-offline";
+        const reason = lastError || "Telegram delivery failed";
+        sub.textContent = "Reason: " + reason;
+        sub.title = "Reason: " + reason;
+    } else {
+        el.textContent = "🟡 CONFIGURED";
+        el.className = "status-value state-warning";
+        sub.textContent = "Status: Not recently tested";
+        sub.title = "Status: Not recently tested";
+    }
 }
 
 /**
@@ -117,8 +326,10 @@ async function fetchLatestEvent() {
 }
 
 function resetLatestMetrics() {
-    document.getElementById("status-device").textContent = "ESP32C3_01";
-    document.getElementById("status-lastevent").textContent = "No events recorded";
+    const devEl = document.getElementById("status-device");
+    if (devEl) devEl.textContent = "ESP32C3_01";
+    const lastEvEl = document.getElementById("status-lastevent");
+    if (lastEvEl) lastEvEl.textContent = "No events recorded";
 
     document.getElementById("card-impact").textContent = "--";
     document.getElementById("card-rotation").textContent = "--";
@@ -133,11 +344,13 @@ function resetLatestMetrics() {
 
 function updateLatestMetrics(event) {
     // Device ID
-    document.getElementById("status-device").textContent = event.device_id || "ESP32C3_01";
+    const devEl = document.getElementById("status-device");
+    if (devEl) devEl.textContent = event.device_id || "ESP32C3_01";
 
     // Last Event Time
     const rawTime = event.created_at || event.timestamp || "";
-    document.getElementById("status-lastevent").textContent = formatTimestamp(rawTime);
+    const lastEvEl = document.getElementById("status-lastevent");
+    if (lastEvEl) lastEvEl.textContent = formatTimestamp(rawTime);
 
     // Telemetry Cards
     const impact = event.impact_g != null ? event.impact_g.toFixed(2) : "--";

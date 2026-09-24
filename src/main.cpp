@@ -161,6 +161,7 @@ unsigned long stateStartTime = 0;
 unsigned long lastSensorSampleTime = 0;
 unsigned long lastPreAlertPulseTime = 0;
 unsigned long lastWiFiReconnectAttempt = 0;
+unsigned long lastHeartbeatTime = 0;
 
 bool preAlertPulseState = false;
 bool alertDispatched = false;
@@ -184,6 +185,7 @@ void connectWiFi();
 void maintainWiFiConnection();
 void triggerAlertDispatch();
 void sendBackendFallEvent();
+void sendHeartbeat();
 void sendTelegramAlertFallback();
 float calculateFallConfidence(float impactG, float rotationRads, float stillnessVar, float tiltDeg, bool freefallPresent);
 bool loadCredentials();
@@ -783,6 +785,57 @@ void sendBackendFallEvent() {
   http.end();
 }
 
+// ============================================================
+// NON-BLOCKING 10-SECOND DEVICE HEARTBEAT
+// ============================================================
+void sendHeartbeat() {
+  if (currentWiFiState != WIFI_STATE_CONNECTED && WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  if (backendURL.length() == 0) {
+    return;
+  }
+
+  // Avoid network calls during grace period or alerting
+  if (currentState == PRE_ALERT || currentState == ALERTING) {
+    return;
+  }
+
+  String endpoint = backendURL;
+  int pos = endpoint.indexOf("/api/fall-event");
+  if (pos != -1) {
+    endpoint = endpoint.substring(0, pos) + "/api/device/heartbeat";
+  } else if (!endpoint.endsWith("/api/device/heartbeat")) {
+    if (!endpoint.endsWith("/")) endpoint += "/";
+    endpoint += "api/device/heartbeat";
+  }
+
+  HTTPClient http;
+  if (http.begin(endpoint)) {
+    http.addHeader("Content-Type", "application/json");
+    http.setTimeout(1500); // 1.5s max non-blocking timeout
+
+    unsigned long currentSeconds = millis() / 1000;
+    int rssi = WiFi.RSSI();
+    String jsonPayload = "{";
+    jsonPayload += "\"device_id\":\"ESP32C3_01\",";
+    jsonPayload += "\"timestamp\":\"UPTIME_" + String(currentSeconds) + "S\",";
+    jsonPayload += "\"uptime_seconds\":" + String(currentSeconds) + ",";
+    jsonPayload += "\"wifi_rssi\":" + String(rssi);
+    jsonPayload += "}";
+
+    int httpCode = http.POST(jsonPayload);
+    if (httpCode > 0) {
+#if DEBUG_SENSOR
+      Serial.print("[HEARTBEAT] Ping success, HTTP code: ");
+      Serial.println(httpCode);
+#endif
+    }
+    http.end();
+  }
+}
+
 void sendTelegramAlertFallback() {
   if (botToken.length() == 0 || chatID.length() == 0 || botToken == "Your_New_Bot_Token") {
     Serial.println("[FALLBACK] Direct Telegram skipped: Credentials unconfigured.");
@@ -1149,8 +1202,14 @@ void loop() {
   // Continuous non-blocking button polling
   handleButtonPress();
 
-  // 50Hz Non-blocking IMU sampling ticker
+  // 10-Second Non-blocking Heartbeat Ticker
   unsigned long now = millis();
+  if (now - lastHeartbeatTime >= 10000) {
+    lastHeartbeatTime = now;
+    sendHeartbeat();
+  }
+
+  // 50Hz Non-blocking IMU sampling ticker
   if (now - lastSensorSampleTime >= SENSOR_SAMPLE_INTERVAL_MS) {
     lastSensorSampleTime = now;
     processSensorStep();

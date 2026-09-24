@@ -161,7 +161,7 @@ body {
    ============================================================ */
 .status-grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
     gap: 1rem;
 }
 
@@ -200,6 +200,21 @@ body {
 
 .state-offline {
     color: var(--status-offline);
+}
+
+.state-warning {
+    color: #f59e0b;
+}
+
+.status-subtext {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+    margin-top: 0.2rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: block;
 }
 
 /* ============================================================

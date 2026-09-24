@@ -44,7 +44,7 @@ def test_case_b_gemini_unavailable():
     print("Fallback Assessment Result:")
     print(json.dumps(result, indent=2))
     
-    is_fallback = "Fallback assessment active" in result.get("assessment", "") or "INVALID_GEMINI_KEY" in result.get("assessment", "")
+    is_fallback = ("Fallback assessment used" in result.get("assessment", "")) or ("Fallback assessment active" in result.get("assessment", "")) or ("INVALID_GEMINI_KEY" in result.get("assessment", ""))
     if is_fallback and result.get("severity") in ["LOW", "MEDIUM", "HIGH", "CRITICAL"]:
         print("SUCCESS: Fallback assessment generated cleanly on Gemini failure.")
         return True
@@ -170,6 +170,61 @@ def test_case_f_single_event_endpoint(event_id: int):
         print(f"FAILED: Single event test failed: {e}")
         return False
 
+def test_case_g_heartbeat_and_device_status():
+    print("\n--- [TEST CASE G] Device Heartbeat & Status Endpoint Check ---")
+    try:
+        # 1. GET status for un-pinged device -> NEVER_CONNECTED
+        resp_never = httpx.get(f"{BACKEND_URL}/api/device/status?device_id=ESP32C3_TEST_NEW", timeout=5.0)
+        data_never = resp_never.json()
+        print("Never Connected Response:", data_never)
+        if data_never.get("status") != "never_connected":
+            print("FAILED: Expected status 'never_connected'")
+            return False
+
+        # 2. POST heartbeat
+        hb_payload = {
+            "device_id": "ESP32C3_TEST_NEW",
+            "uptime_seconds": 120,
+            "wifi_rssi": -55
+        }
+        resp_hb = httpx.post(f"{BACKEND_URL}/api/device/heartbeat", json=hb_payload, timeout=5.0)
+        print(f"Heartbeat POST (HTTP {resp_hb.status_code}):", resp_hb.json())
+        if resp_hb.status_code != 200:
+            print("FAILED: Heartbeat POST failed")
+            return False
+
+        # 3. GET status -> ONLINE
+        resp_online = httpx.get(f"{BACKEND_URL}/api/device/status?device_id=ESP32C3_TEST_NEW", timeout=5.0)
+        data_online = resp_online.json()
+        print("Online Response:", data_online)
+        if data_online.get("status") != "online" or data_online.get("seconds_since_last_seen") > 5:
+            print("FAILED: Expected status 'online' with seconds <= 5")
+            return False
+
+        # 4. Verify historical fall event POST does NOT make an un-pinged device ONLINE
+        fall_payload = {
+            "device_id": "ESP32C3_HISTORICAL_ONLY",
+            "timestamp": "2026-09-23T00:50:00Z",
+            "impact_g": 2.5,
+            "rotation_rads": 3.0,
+            "posture_change_deg": 60.0,
+            "stillness_variation": 0.5,
+            "fall_confidence": 0.90
+        }
+        httpx.post(f"{BACKEND_URL}/api/fall-event", json=fall_payload, timeout=30.0)
+        resp_hist_dev = httpx.get(f"{BACKEND_URL}/api/device/status?device_id=ESP32C3_HISTORICAL_ONLY", timeout=5.0)
+        data_hist_dev = resp_hist_dev.json()
+        print("Historical Fall Event Device Status Response:", data_hist_dev)
+        if data_hist_dev.get("status") != "never_connected":
+            print("FAILED: Fall event payload should NOT set device status to online!")
+            return False
+
+        print("SUCCESS: Heartbeat endpoint, status calculation, and isolation from fall events verified.")
+        return True
+    except Exception as e:
+        print(f"FAILED: Heartbeat test failed: {e}")
+        return False
+
 if __name__ == "__main__":
     print("==================================================")
     print("  ESP32-C3 Phase 4B Database & API Test Suite    ")
@@ -189,6 +244,7 @@ if __name__ == "__main__":
     res_a, created_id = test_case_a_valid_event_storage()
     res_e = test_case_e_history_endpoint(created_id if created_id else 1)
     res_f = test_case_f_single_event_endpoint(created_id if created_id else 1)
+    res_g = test_case_g_heartbeat_and_device_status()
 
     print("\n==================================================")
     print("            PHASE 4B FINAL TEST SUMMARY           ")
@@ -199,4 +255,5 @@ if __name__ == "__main__":
     print(f"Test Case D (Invalid Payload 422 Check):     {'PASS' if res_d else 'FAIL'}")
     print(f"Test Case E (GET /api/events History):        {'PASS' if res_e else 'FAIL'}")
     print(f"Test Case F (GET /api/events/{{id}} 404 Check): {'PASS' if res_f else 'FAIL'}")
+    print(f"Test Case G (Device Heartbeat & Online Status):{'PASS' if res_g else 'FAIL'}")
     print("==================================================")
