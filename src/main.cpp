@@ -74,13 +74,15 @@
 #define FREEFALL_ACCEL_THRESHOLD   5.0f   // m/s^2 (< 0.51g) weightlessness threshold
 #define FREEFALL_WINDOW_MS         500    // Max ms before impact to register free-fall
 
-#define IMPACT_ACCEL_THRESHOLD     15.0f  // m/s^2 (> 1.53g) peak impact threshold
+#define IMPACT_ACCEL_THRESHOLD     15.0f  // m/s^2 (> 1.53g) primary peak impact threshold
+#define IMPACT_CONFIRM_THRESHOLD   12.0f  // m/s^2 (> 1.22g) 2nd-sample verification threshold
 #define ROTATION_THRESHOLD         2.0f   // rad/s (> ~115 deg/s) angular velocity threshold
 #define ROTATION_CHECK_MS          700    // Max ms after impact to confirm rotation
 
-#define INACTIVITY_WINDOW_MS       2500   // Post-impact stillness sampling window (ms)
-#define INACTIVITY_VARIATION_MAX   2.2f   // Max post-impact acceleration variance for stillness
-#define POSTURE_TILT_COS_MAX       0.819f // cos(35 deg): orientation tilt change > 35 degrees
+#define POST_IMPACT_SETTLE_MS      500    // 500 ms settling exclusion window to ignore impact bounce
+#define INACTIVITY_WINDOW_MS       2000   // 2.0s settled stillness sampling window (ms)
+#define MIN_VALID_SAMPLES          80     // Minimum valid samples required for inactivity analysis
+#define FALL_CONFIDENCE_THRESHOLD  0.55f  // Minimum fall confidence score to trigger PRE_ALERT
 
 // Alert & Cooldown Durations
 #define PRE_ALERT_HOLD_MS          10000  // 10-second user cancellation grace period
@@ -90,8 +92,8 @@
 // Wi-Fi Reconnect Settings
 #define WIFI_RECONNECT_INTERVAL_MS 15000  // Background Wi-Fi reconnect retry interval (ms)
 
-// Inactivity Buffer
-#define BUFFER_SIZE 50
+// Inactivity Buffer (100 samples max)
+#define BUFFER_SIZE 100
 float accelMagBuffer[BUFFER_SIZE];
 float accelXBuffer[BUFFER_SIZE];
 float accelYBuffer[BUFFER_SIZE];
@@ -107,9 +109,11 @@ float snapshotBaselineAx = 0.0f;
 float snapshotBaselineAy = 0.0f;
 float snapshotBaselineAz = 9.80665f;
 
-// Free-fall Tracking State
+// Free-fall & I2C Error Tracking State
 unsigned long lastFreefallTime = 0;
 bool freefallDetected = false;
+unsigned long totalI2cErrors = 0;
+unsigned long consecutiveI2cErrors = 0;
 
 // Captured Kinematic Telemetry for Backend POST Payload
 float capturedImpactG = 0.0f;
@@ -119,12 +123,24 @@ float capturedStillnessVariation = 0.0f;
 float capturedFallConfidence = 0.0f;
 bool capturedFreefallPresent = false;
 
+// Candidate Verification & Peak Rotation Tracking
+unsigned long impactCandidateTime = 0;
+float impactCandidatePeak = 0.0f;
+float capturedRotationPeak = 0.0f;
+
+// Isolated I2C Recovery Function (Disabled for now)
+void checkAndRecoverI2C() {
+  // Reserved for future bus reset verification if needed:
+  // Wire.begin(SDA_PIN, SCL_PIN);
+}
+
 // ============================================================
 // SYSTEM STATE & WIFI STATE
 // ============================================================
 enum SystemState {
   MONITORING,
-  ROTATION_CHECK,
+  IMPACT_VERIFY,
+  POST_IMPACT_SETTLING,
   INACTIVITY_CHECK,
   PRE_ALERT,
   ALERTING,
@@ -147,7 +163,6 @@ unsigned long lastPreAlertPulseTime = 0;
 unsigned long lastWiFiReconnectAttempt = 0;
 
 bool preAlertPulseState = false;
-bool rotationConfirmed = false;
 bool alertDispatched = false;
 
 // Dynamic Credentials & NVS Preferences
@@ -179,6 +194,7 @@ bool mpuWriteRegister(uint8_t reg, uint8_t value);
 bool mpuReadRegister(uint8_t reg, uint8_t &value);
 bool mpuCheckPresent();
 bool mpuReadAccelGyro(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
+bool mpuReadAccelGyro(int16_t &rawAx, int16_t &rawAy, int16_t &rawAz, int16_t &rawGx, int16_t &rawGy, int16_t &rawGz, float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
 void handleButtonPress();
 
 // ============================================================
@@ -225,7 +241,7 @@ bool mpuCheckPresent() {
 // ============================================================
 // READ MPU6050 ACCEL + GYRO
 // ============================================================
-bool mpuReadAccelGyro(float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
+bool mpuReadAccelGyro(int16_t &rawAx, int16_t &rawAy, int16_t &rawAz, int16_t &rawGx, int16_t &rawGy, int16_t &rawGz, float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(ACCEL_XOUT_H);
   if (Wire.endTransmission(false) != 0) {
@@ -237,17 +253,17 @@ bool mpuReadAccelGyro(float &ax, float &ay, float &az, float &gx, float &gy, flo
     return false;
   }
 
-  int16_t rawAx = ((int16_t)Wire.read() << 8) | Wire.read();
-  int16_t rawAy = ((int16_t)Wire.read() << 8) | Wire.read();
-  int16_t rawAz = ((int16_t)Wire.read() << 8) | Wire.read();
+  rawAx = ((int16_t)Wire.read() << 8) | Wire.read();
+  rawAy = ((int16_t)Wire.read() << 8) | Wire.read();
+  rawAz = ((int16_t)Wire.read() << 8) | Wire.read();
 
   // Skip temperature (2 bytes)
   Wire.read();
   Wire.read();
 
-  int16_t rawGx = ((int16_t)Wire.read() << 8) | Wire.read();
-  int16_t rawGy = ((int16_t)Wire.read() << 8) | Wire.read();
-  int16_t rawGz = ((int16_t)Wire.read() << 8) | Wire.read();
+  rawGx = ((int16_t)Wire.read() << 8) | Wire.read();
+  rawGy = ((int16_t)Wire.read() << 8) | Wire.read();
+  rawGz = ((int16_t)Wire.read() << 8) | Wire.read();
 
   // Accel -> m/s²
   ax = (rawAx / ACCEL_SCALE) * 9.80665f;
@@ -260,6 +276,11 @@ bool mpuReadAccelGyro(float &ax, float &ay, float &az, float &gx, float &gy, flo
   gz = (rawGz / GYRO_SCALE) * (PI / 180.0f);
 
   return true;
+}
+
+bool mpuReadAccelGyro(float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
+  int16_t rx, ry, rz, rgx, rgy, rgz;
+  return mpuReadAccelGyro(rx, ry, rz, rgx, rgy, rgz, ax, ay, az, gx, gy, gz);
 }
 
 // ============================================================
@@ -442,10 +463,12 @@ void resetToMonitoring() {
   digitalWrite(BUZZER_PIN, LOW);
   digitalWrite(LED_PIN, LOW);
   currentState = MONITORING;
-  rotationConfirmed = false;
   alertDispatched = false;
   freefallDetected = false;
+  capturedFreefallPresent = false;
   bufferIndex = 0;
+  impactCandidatePeak = 0.0f;
+  capturedRotationPeak = 0.0f;
 }
 
 // ============================================================
@@ -479,11 +502,13 @@ void handleButtonPress() {
 void setup() {
   Serial.begin(115200);
 
-  // Short 1-second bounded wait for USB Serial (non-blocking for battery power)
+  // Bounded wait for USB Serial (non-blocking for battery power)
   unsigned long serialWaitStart = millis();
-  while (!Serial && millis() - serialWaitStart < 1000) {
+  while (!Serial && millis() - serialWaitStart < 5000) {
     delay(10);
   }
+
+  Serial.println("BOOT: ESP32-C3 firmware starting");
 
   delay(500);
 
@@ -536,6 +561,8 @@ void setup() {
   }
 
   Serial.println("Credentials loaded successfully.");
+  Serial.print("[WIFI] Saved SSID: ");
+  Serial.println(wifiSSID);
   Serial.print("Target Backend API URL: ");
   Serial.println(backendURL);
 
@@ -593,7 +620,9 @@ void setup() {
 // WIFI CONNECTION & AUTOMATIC RECONNECTION STATE MACHINE
 // ============================================================
 void connectWiFi() {
-  Serial.println("[WIFI] Connecting to saved network...");
+  Serial.print("[WIFI] Attempting connection to SSID: ");
+  Serial.println(wifiSSID);
+
   WiFi.mode(WIFI_STA);
   WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
   currentWiFiState = WIFI_STATE_CONNECTING;
@@ -606,11 +635,19 @@ void connectWiFi() {
 
   if (WiFi.status() == WL_CONNECTED) {
     currentWiFiState = WIFI_STATE_CONNECTED;
-    Serial.print("[WIFI] Connected. IP: ");
+    Serial.println("[WIFI] CONNECTED");
+    Serial.print("[WIFI] SSID: ");
+    Serial.println(WiFi.SSID());
+    Serial.print("[WIFI] ESP32 IP: ");
     Serial.println(WiFi.localIP());
+    Serial.print("[WIFI] Gateway: ");
+    Serial.println(WiFi.gatewayIP());
+    Serial.print("[WIFI] RSSI: ");
+    Serial.println(WiFi.RSSI());
   } else {
     currentWiFiState = WIFI_STATE_DISCONNECTED;
-    Serial.println("[WIFI] Initial connection attempt timed out.");
+    Serial.print("[WIFI] Connection failed/disconnected. Status: ");
+    Serial.println(WiFi.status());
     Serial.println("[WIFI] Operating in standalone LOCAL mode; background reconnect active.");
   }
 }
@@ -621,20 +658,29 @@ void maintainWiFiConnection() {
   if (status == WL_CONNECTED) {
     if (currentWiFiState != WIFI_STATE_CONNECTED) {
       currentWiFiState = WIFI_STATE_CONNECTED;
-      Serial.print("[WIFI] Reconnected. IP: ");
+      Serial.println("[WIFI] CONNECTED");
+      Serial.print("[WIFI] SSID: ");
+      Serial.println(WiFi.SSID());
+      Serial.print("[WIFI] ESP32 IP: ");
       Serial.println(WiFi.localIP());
+      Serial.print("[WIFI] Gateway: ");
+      Serial.println(WiFi.gatewayIP());
+      Serial.print("[WIFI] RSSI: ");
+      Serial.println(WiFi.RSSI());
     }
   } else {
     if (currentWiFiState == WIFI_STATE_CONNECTED) {
       currentWiFiState = WIFI_STATE_DISCONNECTED;
-      Serial.println("[WIFI] Connection lost.");
+      Serial.print("[WIFI] Connection failed/disconnected. Status: ");
+      Serial.println(status);
     }
 
     unsigned long now = millis();
     if (now - lastWiFiReconnectAttempt >= WIFI_RECONNECT_INTERVAL_MS) {
       lastWiFiReconnectAttempt = now;
       currentWiFiState = WIFI_STATE_CONNECTING;
-      Serial.println("[WIFI] Reconnect attempt...");
+      Serial.print("[WIFI] Attempting connection to SSID: ");
+      Serial.println(wifiSSID);
       WiFi.reconnect();
     }
   }
@@ -643,23 +689,31 @@ void maintainWiFiConnection() {
 // ============================================================
 // DYNAMIC FALL CONFIDENCE CALCULATION
 // ============================================================
-float calculateFallConfidence(float impactG, float rotationRads, float stillnessVar, float tiltDeg, bool freefallPresent) {
+float calculateFallConfidence(float impactG, float rotationRads, float stillnessStdDev, float tiltDeg, bool freefallPresent) {
   // 1. Impact Strength Score (Max 0.30)
-  float sImpact = (impactG / 6.0f) * 0.30f;
+  float sImpact = (impactG * 9.80665f - 15.0f) / (58.84f - 15.0f) * 0.30f;
+  if (sImpact < 0.0f) sImpact = 0.0f;
   if (sImpact > 0.30f) sImpact = 0.30f;
 
   // 2. Rotation Velocity Score (Max 0.25)
-  float sRotation = (rotationRads / 6.0f) * 0.25f;
+  float sRotation = (rotationRads - 2.0f) / (6.0f - 2.0f) * 0.25f;
+  if (sRotation < 0.0f) sRotation = 0.0f;
   if (sRotation > 0.25f) sRotation = 0.25f;
 
-  // 3. Stillness & Inactivity Score (Max 0.20)
-  float sStillness = 0.20f * (1.0f - (stillnessVar / INACTIVITY_VARIATION_MAX));
-  if (sStillness < 0.05f) sStillness = 0.05f;
-  if (sStillness > 0.20f) sStillness = 0.20f;
+  // 3. Stillness Score (Max 0.20)
+  float fSigma = 1.0f - (stillnessStdDev / 3.0f);
+  if (fSigma < 0.0f) fSigma = 0.0f;
+  if (fSigma > 1.0f) fSigma = 1.0f;
+  float sStillness = 0.20f * fSigma;
 
   // 4. Posture Orientation Shift Score (Max 0.20)
-  float sTilt = (tiltDeg / 90.0f) * 0.20f;
-  if (sTilt > 0.20f) sTilt = 0.20f;
+  float sTilt = 0.0f;
+  if (tiltDeg >= 30.0f) {
+    sTilt = 0.10f + 0.10f * ((tiltDeg - 30.0f) / 30.0f);
+    if (sTilt > 0.20f) sTilt = 0.20f;
+  } else if (tiltDeg >= 15.0f) {
+    sTilt = 0.05f + 0.05f * ((tiltDeg - 15.0f) / 15.0f);
+  }
 
   // 5. Free-fall Weightlessness Bonus (Max 0.05)
   float sFreefall = freefallPresent ? 0.05f : 0.00f;
@@ -762,16 +816,61 @@ void sendTelegramAlertFallback() {
 // ============================================================
 // SENSOR PROCESSING (EXECUTED AT 50Hz NON-BLOCKING)
 // ============================================================
+unsigned long lastSensorDebugTime = 0;
+
 void processSensorStep() {
+  int16_t rawAx, rawAy, rawAz;
+  int16_t rawGx, rawGy, rawGz;
   float ax, ay, az;
   float gx, gy, gz;
 
-  if (!mpuReadAccelGyro(ax, ay, az, gx, gy, gz)) {
-    return;
+  // 1. I2C Sample Validation: Discard corrupted samples immediately
+  if (!mpuReadAccelGyro(rawAx, rawAy, rawAz, rawGx, rawGy, rawGz, ax, ay, az, gx, gy, gz)) {
+    totalI2cErrors++;
+    consecutiveI2cErrors++;
+    Serial.print("[I2C ERROR] Invalid read! Total: ");
+    Serial.print(totalI2cErrors);
+    Serial.print(" | Consecutive: ");
+    Serial.println(consecutiveI2cErrors);
+    return; // Discard sample: do not update baseline, FSM, or buffer
   }
+
+  // Reset consecutive I2C error counter upon a successful valid read
+  consecutiveI2cErrors = 0;
 
   float accelMag = sqrt(ax * ax + ay * ay + az * az);
   float gyroMag  = sqrt(gx * gx + gy * gy + gz * gz);
+  unsigned long now = millis();
+
+  // Update peak rotation evidence across post-impact period
+  if (currentState == IMPACT_VERIFY || currentState == POST_IMPACT_SETTLING || currentState == INACTIVITY_CHECK) {
+    if (gyroMag > capturedRotationPeak) {
+      capturedRotationPeak = gyroMag;
+    }
+  }
+
+  // Temporary Diagnostic Printing (once every 500 ms)
+  if (now - lastSensorDebugTime >= 500) {
+    lastSensorDebugTime = now;
+    Serial.print("[SENSOR DEBUG] Raw Accel [X,Y,Z]: ");
+    Serial.print(rawAx); Serial.print(", ");
+    Serial.print(rawAy); Serial.print(", ");
+    Serial.print(rawAz);
+    Serial.print(" | Accel m/s^2 [X,Y,Z]: ");
+    Serial.print(ax, 2); Serial.print(", ");
+    Serial.print(ay, 2); Serial.print(", ");
+    Serial.print(az, 2);
+    Serial.print(" | Accel Mag: ");
+    Serial.print(accelMag, 2);
+    Serial.print(" m/s^2 | Raw Gyro [X,Y,Z]: ");
+    Serial.print(rawGx); Serial.print(", ");
+    Serial.print(rawGy); Serial.print(", ");
+    Serial.print(rawGz);
+    Serial.print(" | Gyro rad/s [X,Y,Z]: ");
+    Serial.print(gx, 2); Serial.print(", ");
+    Serial.print(gy, 2); Serial.print(", ");
+    Serial.println(gz, 2);
+  }
 
 #if DEBUG_SENSOR
   Serial.print("Accel: ");
@@ -780,8 +879,6 @@ void processSensorStep() {
   Serial.print(gyroMag, 2);
   Serial.println(" rad/s");
 #endif
-
-  unsigned long now = millis();
 
   // Baseline Posture Update & Free-fall Tracking (during MONITORING)
   if (currentState == MONITORING) {
@@ -809,63 +906,68 @@ void processSensorStep() {
     // --------------------------------------------------------
     case MONITORING:
       if (accelMag > IMPACT_ACCEL_THRESHOLD) {
-        // Check if free-fall occurred within the recent timing window before impact
+        impactCandidateTime = now;
+        impactCandidatePeak = accelMag;
+        capturedRotationPeak = gyroMag;
+
         bool recentFreefall = freefallDetected && (now - lastFreefallTime <= FREEFALL_WINDOW_MS);
-
-        Serial.println();
-        Serial.println("==========================================");
-        Serial.println("  !!! HIGH IMPACT DETECTED !!!");
-        Serial.print("  Impact Peak: ");
-        Serial.print(accelMag, 2);
-        Serial.print(" m/s^2 (");
-        Serial.print(accelMag / 9.80665f, 2);
-        Serial.println("g)");
-        Serial.print("  Free-fall Evidence: ");
-        Serial.println(recentFreefall ? "YES" : "NO");
-        Serial.println("==========================================");
-
-        // Snapshot kinematic measurements & baseline
-        snapshotBaselineAx = baselineAx;
-        snapshotBaselineAy = baselineAy;
-        snapshotBaselineAz = baselineAz;
-
-        capturedImpactG = accelMag / 9.80665f;
-        capturedRotationRads = gyroMag;
         capturedFreefallPresent = recentFreefall;
+        freefallDetected = false; // Reset candidate freefall flag
 
-        currentState = ROTATION_CHECK;
-        stateStartTime = now;
-        rotationConfirmed = (gyroMag > ROTATION_THRESHOLD);
+        currentState = IMPACT_VERIFY;
       }
       break;
 
     // --------------------------------------------------------
-    // 2. ROTATION CHECK
+    // 2. IMPACT_VERIFY (2-Sample Confirmation)
     // --------------------------------------------------------
-    case ROTATION_CHECK:
-      if (gyroMag > ROTATION_THRESHOLD) {
-        rotationConfirmed = true;
-      }
-      if (gyroMag > capturedRotationRads) {
-        capturedRotationRads = gyroMag;
-      }
+    case IMPACT_VERIFY:
+      if (now - impactCandidateTime <= 40) {
+        if (accelMag > IMPACT_CONFIRM_THRESHOLD) {
+          if (accelMag > impactCandidatePeak) {
+            impactCandidatePeak = accelMag;
+          }
 
-      if (now - stateStartTime >= ROTATION_CHECK_MS) {
-        if (rotationConfirmed) {
-          Serial.println("[FSM] Gyro rotation signature CONFIRMED.");
-          Serial.println("[FSM] Checking post-impact stillness & posture shift...");
-          currentState = INACTIVITY_CHECK;
+          Serial.println();
+          Serial.println("==========================================");
+          Serial.println("  !!! HIGH IMPACT CANDIDATE CONFIRMED !!!");
+          Serial.print("  Impact Peak: ");
+          Serial.print(impactCandidatePeak, 2);
+          Serial.print(" m/s^2 (");
+          Serial.print(impactCandidatePeak / 9.80665f, 2);
+          Serial.println("g)");
+          Serial.print("  Free-fall Evidence: ");
+          Serial.println(capturedFreefallPresent ? "YES" : "NO");
+          Serial.println("==========================================");
+
+          // Snapshot baseline vector and captured impact G
+          snapshotBaselineAx = baselineAx;
+          snapshotBaselineAy = baselineAy;
+          snapshotBaselineAz = baselineAz;
+          capturedImpactG = impactCandidatePeak / 9.80665f;
+
+          currentState = POST_IMPACT_SETTLING;
           stateStartTime = now;
-          bufferIndex = 0;
-        } else {
-          Serial.println("[FSM] No rotation detected. Impact event REJECTED.");
-          resetToMonitoring();
         }
+      } else {
+        // Single-frame noise or I2C glitch rejected
+        resetToMonitoring();
       }
       break;
 
     // --------------------------------------------------------
-    // 3. INACTIVITY CHECK
+    // 3. POST_IMPACT_SETTLING (500 ms Exclusion Window)
+    // --------------------------------------------------------
+    case POST_IMPACT_SETTLING:
+      if (now - stateStartTime >= POST_IMPACT_SETTLE_MS) {
+        currentState = INACTIVITY_CHECK;
+        stateStartTime = now;
+        bufferIndex = 0;
+      }
+      break;
+
+    // --------------------------------------------------------
+    // 4. INACTIVITY_CHECK (2.0s Settled Window Analysis)
     // --------------------------------------------------------
     case INACTIVITY_CHECK:
       if (bufferIndex < BUFFER_SIZE) {
@@ -877,72 +979,85 @@ void processSensorStep() {
       }
 
       if (now - stateStartTime >= INACTIVITY_WINDOW_MS || bufferIndex >= BUFFER_SIZE) {
-        if (bufferIndex == 0) {
+        // Minimum valid sample requirement check
+        if (bufferIndex < MIN_VALID_SAMPLES) {
+          Serial.print("[FSM] REJECTED: Insufficient valid samples collected (");
+          Serial.print(bufferIndex);
+          Serial.println(" < 80).");
           resetToMonitoring();
           break;
         }
 
-        // Calculate min, max, average magnitude
-        float minVal = accelMagBuffer[0];
-        float maxVal = accelMagBuffer[0];
-        float sumVal = accelMagBuffer[0];
-        float sumX   = accelXBuffer[0];
-        float sumY   = accelYBuffer[0];
-        float sumZ   = accelZBuffer[0];
+        float sumVal = 0.0f, sumX = 0.0f, sumY = 0.0f, sumZ = 0.0f;
+        int nearGravityCount = 0;
 
-        for (int i = 1; i < bufferIndex; i++) {
-          if (accelMagBuffer[i] < minVal) minVal = accelMagBuffer[i];
-          if (accelMagBuffer[i] > maxVal) maxVal = accelMagBuffer[i];
+        for (int i = 0; i < bufferIndex; i++) {
           sumVal += accelMagBuffer[i];
           sumX   += accelXBuffer[i];
           sumY   += accelYBuffer[i];
           sumZ   += accelZBuffer[i];
+          if (accelMagBuffer[i] >= 7.0f && accelMagBuffer[i] <= 12.5f) {
+            nearGravityCount++;
+          }
         }
 
-        float variation = maxVal - minVal;
-        float avgAccel  = sumVal / bufferIndex;
+        float meanAccel = sumVal / bufferIndex;
         float avgX      = sumX / bufferIndex;
         float avgY      = sumY / bufferIndex;
         float avgZ      = sumZ / bufferIndex;
 
-        // Compute Posture Vector Dot Product & Tilt Angle Shift
-        float magBase = sqrt(snapshotBaselineAx * snapshotBaselineAx + snapshotBaselineAy * snapshotBaselineAy + snapshotBaselineAz * snapshotBaselineAz);
-        float magPost = sqrt(avgX * avgX + avgY * avgY + avgZ * avgZ);
-
-        float dotProduct = (snapshotBaselineAx * avgX + snapshotBaselineAy * avgY + snapshotBaselineAz * avgZ);
-        float cosTilt = 1.0f;
-        if (magBase > 0.1f && magPost > 0.1f) {
-          cosTilt = dotProduct / (magBase * magPost);
+        float varianceSum = 0.0f;
+        for (int i = 0; i < bufferIndex; i++) {
+          float diff = accelMagBuffer[i] - meanAccel;
+          varianceSum += diff * diff;
         }
+        float stdDev = sqrt(varianceSum / bufferIndex);
+        float nearGravityPercent = ((float)nearGravityCount / bufferIndex) * 100.0f;
+
+        // Posture Angle Calculation
+        float magBase = sqrt(snapshotBaselineAx*snapshotBaselineAx + snapshotBaselineAy*snapshotBaselineAy + snapshotBaselineAz*snapshotBaselineAz);
+        float magPost = sqrt(avgX*avgX + avgY*avgY + avgZ*avgZ);
+        float dotProduct = (snapshotBaselineAx*avgX + snapshotBaselineAy*avgY + snapshotBaselineAz*avgZ);
+        float cosTilt = 1.0f;
+        if (magBase > 0.1f && magPost > 0.1f) cosTilt = dotProduct / (magBase * magPost);
         if (cosTilt > 1.0f) cosTilt = 1.0f;
         if (cosTilt < -1.0f) cosTilt = -1.0f;
-
         float postureShiftDeg = acos(cosTilt) * (180.0f / PI);
 
-        Serial.print("[FSM] Post-Impact Variation: ");
-        Serial.print(variation, 2);
-        Serial.print(" m/s^2 | Avg Magnitude: ");
-        Serial.print(avgAccel, 2);
-        Serial.print(" m/s^2 | Tilt Shift: ");
-        Serial.print(postureShiftDeg, 1);
-        Serial.println(" deg");
+        // Compute Fall Confidence Score
+        float confidence = calculateFallConfidence(
+          capturedImpactG,
+          capturedRotationPeak,
+          stdDev,
+          postureShiftDeg,
+          capturedFreefallPresent
+        );
 
-        bool stillnessConfirmed = (variation < INACTIVITY_VARIATION_MAX) && (avgAccel >= 7.0f && avgAccel <= 12.5f);
-        bool postureShiftConfirmed = (cosTilt < POSTURE_TILT_COS_MAX);
+        // Comprehensive Debug Telemetry Logging
+        Serial.println();
+        Serial.println("==========================================");
+        Serial.println("[STILLNESS TELEMETRY]");
+        Serial.print("samples="); Serial.println(bufferIndex);
+        Serial.print("totalI2cErrors="); Serial.println(totalI2cErrors);
+        Serial.print("consecutiveI2cErrors="); Serial.println(consecutiveI2cErrors);
+        Serial.print("meanAccel="); Serial.print(meanAccel, 2); Serial.println(" m/s^2");
+        Serial.print("stdDev="); Serial.print(stdDev, 2); Serial.println(" m/s^2");
+        Serial.print("nearGravityPercent="); Serial.print(nearGravityPercent, 1); Serial.println("%");
+        Serial.print("postureShift="); Serial.print(postureShiftDeg, 1); Serial.println(" deg");
+        Serial.print("impactCandidatePeak="); Serial.print(impactCandidatePeak, 2); Serial.println(" m/s^2");
+        Serial.print("rotationPeak="); Serial.print(capturedRotationPeak, 2); Serial.println(" rad/s");
+        Serial.print("freefallDetected="); Serial.println(capturedFreefallPresent ? "YES" : "NO");
+        Serial.print("confidence="); Serial.println(confidence, 2);
+        Serial.println("==========================================");
 
-        if (stillnessConfirmed && postureShiftConfirmed) {
-          // Store captured telemetry
+        // Safety Gate & Decision Threshold
+        bool safetyGatePassed = (meanAccel >= 7.0f && meanAccel <= 12.5f && stdDev < 3.0f);
+
+        if (safetyGatePassed && confidence >= FALL_CONFIDENCE_THRESHOLD) {
+          capturedFallConfidence = confidence;
+          capturedStillnessVariation = stdDev;
           capturedPostureChangeDeg = postureShiftDeg;
-          capturedStillnessVariation = variation;
-
-          // Calculate Dynamic Multi-Factor Fall Confidence Score (0.00 to 1.00)
-          capturedFallConfidence = calculateFallConfidence(
-            capturedImpactG,
-            capturedRotationRads,
-            capturedStillnessVariation,
-            capturedPostureChangeDeg,
-            capturedFreefallPresent
-          );
+          capturedRotationRads = capturedRotationPeak;
 
           Serial.println();
           Serial.println("==========================================");
@@ -959,8 +1074,8 @@ void processSensorStep() {
           lastPreAlertPulseTime = now;
           preAlertPulseState = false;
         } else {
-          if (!stillnessConfirmed) Serial.println("[FSM] Event REJECTED: User continued moving.");
-          if (!postureShiftConfirmed) Serial.println("[FSM] Event REJECTED: No significant posture orientation tilt shift.");
+          if (!safetyGatePassed) Serial.println("[FSM] Event REJECTED: Safety gate failed (motion/gravity out of range).");
+          else Serial.println("[FSM] Event REJECTED: Confidence score below threshold (0.55).");
           resetToMonitoring();
         }
       }

@@ -32,11 +32,20 @@ def init_db():
                 recommended_action TEXT,
                 telegram_delivered INTEGER DEFAULT 0,
                 alert_status TEXT,
+                failure_reason TEXT,
                 created_at TEXT NOT NULL
             );
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_fall_events_device_id ON fall_events(device_id);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_fall_events_timestamp ON fall_events(timestamp);")
+
+            # Migration: ensure failure_reason column exists in existing SQLite tables
+            cursor.execute("PRAGMA table_info(fall_events);")
+            columns = [row[1] for row in cursor.fetchall()]
+            if "failure_reason" not in columns:
+                logging.info("[DB] Adding missing 'failure_reason' column to fall_events table.")
+                cursor.execute("ALTER TABLE fall_events ADD COLUMN failure_reason TEXT;")
+
             conn.commit()
             logging.info("[DB] SQLite database initialized successfully.")
     except Exception as e:
@@ -107,7 +116,8 @@ def update_event_gemini(
 def update_event_telegram(
     event_id: int,
     telegram_delivered: bool,
-    alert_status: str
+    alert_status: str,
+    failure_reason: Optional[str] = None
 ):
     delivered_int = 1 if telegram_delivered else 0
     try:
@@ -116,13 +126,33 @@ def update_event_telegram(
             cursor.execute("""
             UPDATE fall_events SET
                 telegram_delivered = ?,
-                alert_status = ?
+                alert_status = ?,
+                failure_reason = ?
             WHERE id = ?
-            """, (delivered_int, alert_status, event_id))
+            """, (delivered_int, alert_status, failure_reason, event_id))
             conn.commit()
-            logging.info(f"[DB] Event {event_id} updated with Telegram status (Delivered: {telegram_delivered}).")
+            logging.info(f"[DB] Event {event_id} updated with Telegram status (Delivered: {telegram_delivered}, Reason: {failure_reason}).")
     except Exception as e:
         logging.error(f"[DB] Failed to update event {event_id} with Telegram status: {e}")
+
+def update_event_failure(
+    event_id: int,
+    alert_status: str,
+    failure_reason: str
+):
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+            UPDATE fall_events SET
+                alert_status = ?,
+                failure_reason = ?
+            WHERE id = ?
+            """, (alert_status, failure_reason, event_id))
+            conn.commit()
+            logging.info(f"[DB] Event {event_id} updated with failure status: {failure_reason}")
+    except Exception as e:
+        logging.error(f"[DB] Failed to update event {event_id} failure status: {e}")
 
 def get_events(limit: int = 50, device_id: Optional[str] = None) -> List[Dict[str, Any]]:
     # Cap maximum limit at 100
@@ -149,6 +179,9 @@ def get_events(limit: int = 50, device_id: Optional[str] = None) -> List[Dict[st
             for row in rows:
                 event_dict = dict(row)
                 event_dict["telegram_delivered"] = bool(event_dict.get("telegram_delivered", 0))
+                event_dict["event_id"] = event_dict["id"]
+                if "failure_reason" not in event_dict or event_dict["failure_reason"] is None:
+                    event_dict["failure_reason"] = None
                 events.append(event_dict)
             return events
     except Exception as e:
@@ -164,8 +197,21 @@ def get_event_by_id(event_id: int) -> Optional[Dict[str, Any]]:
             if row:
                 event_dict = dict(row)
                 event_dict["telegram_delivered"] = bool(event_dict.get("telegram_delivered", 0))
+                event_dict["event_id"] = event_dict["id"]
+                if "failure_reason" not in event_dict or event_dict["failure_reason"] is None:
+                    event_dict["failure_reason"] = None
                 return event_dict
             return None
     except Exception as e:
         logging.error(f"[DB] Error fetching event by ID {event_id}: {e}")
         return None
+
+def get_latest_event(device_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    events = get_events(limit=1, device_id=device_id)
+    if events:
+        event = events[0]
+        event["event_id"] = event["id"]
+        return event
+    return None
+
+

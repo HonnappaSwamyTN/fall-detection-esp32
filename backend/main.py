@@ -3,6 +3,7 @@ import json
 import logging
 from typing import Dict, Any, Optional, List
 from fastapi import FastAPI, HTTPException, status, Query
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import httpx
 from dotenv import load_dotenv
@@ -102,7 +103,7 @@ def analyze_fall_with_gemini(event: FallEventRequest, override_api_key: Optional
     - Return ONLY a valid JSON object matching the requested schema.
     """
 
-    models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash"]
+    models_to_try = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
     last_exception = None
 
     for model_name in models_to_try:
@@ -135,13 +136,32 @@ def analyze_fall_with_gemini(event: FallEventRequest, override_api_key: Optional
 # ============================================================
 # TELEGRAM BOT HELPER
 # ============================================================
-def send_telegram_alert(event: FallEventRequest, assessment: Dict[str, Any], override_bot_token: Optional[str] = None, override_chat_id: Optional[str] = None) -> bool:
+def sanitize_secret(msg: str, bot_token: Optional[str] = None) -> str:
+    if not msg:
+        return ""
+    if bot_token and len(bot_token) > 5 and bot_token in msg:
+        msg = msg.replace(bot_token, "[MASKED_BOT_TOKEN]")
+    env_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if env_token and len(env_token) > 5 and env_token in msg:
+        msg = msg.replace(env_token, "[MASKED_BOT_TOKEN]")
+    env_gemini = os.getenv("GEMINI_API_KEY")
+    if env_gemini and len(env_gemini) > 5 and env_gemini in msg:
+        msg = msg.replace(env_gemini, "[MASKED_GEMINI_KEY]")
+    return msg
+
+def send_telegram_alert(
+    event: FallEventRequest,
+    assessment: Dict[str, Any],
+    override_bot_token: Optional[str] = None,
+    override_chat_id: Optional[str] = None
+) -> tuple[bool, Optional[str]]:
     bot_token = override_bot_token if override_bot_token is not None else os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = override_chat_id if override_chat_id is not None else os.getenv("TELEGRAM_CHAT_ID")
 
     if not bot_token or not chat_id or bot_token.startswith("your_") or chat_id.startswith("your_"):
-        logging.warning("[TELEGRAM] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID unconfigured. Skipping Telegram dispatch.")
-        return False
+        reason = "Telegram delivery skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID unconfigured"
+        logging.warning(f"[TELEGRAM] {reason}")
+        return False, reason
 
     masked_chat = f"...{chat_id[-4:]}" if len(chat_id) >= 4 else "masked"
     logging.info(f"[TELEGRAM] Request started for chat ID '{masked_chat}'")
@@ -176,17 +196,33 @@ def send_telegram_alert(event: FallEventRequest, assessment: Dict[str, Any], ove
     }
 
     try:
-        with httpx.Client(timeout=10.0) as client:
+        with httpx.Client(timeout=5.0) as client:
             resp = client.post(url, json=payload)
             if resp.status_code == 200:
                 logging.info("[TELEGRAM] Delivery success (HTTP 200)")
-                return True
+                return True, None
+            elif resp.status_code == 401:
+                reason = "Telegram delivery failed: HTTP 401 Unauthorized"
+                logging.error(f"[TELEGRAM] {reason}")
+                return False, reason
+            elif resp.status_code == 403:
+                reason = "Telegram delivery failed: HTTP 403 Forbidden"
+                logging.error(f"[TELEGRAM] {reason}")
+                return False, reason
             else:
-                logging.error(f"[TELEGRAM] Delivery failure: HTTP {resp.status_code} - {resp.text}")
-                return False
+                raw_err = f"Telegram delivery failed: HTTP {resp.status_code}"
+                reason = sanitize_secret(raw_err, bot_token)
+                logging.error(f"[TELEGRAM] {reason}")
+                return False, reason
+    except httpx.TimeoutException:
+        reason = "Telegram delivery failed: network timeout"
+        logging.error(f"[TELEGRAM] {reason}")
+        return False, reason
     except Exception as e:
-        logging.error(f"[TELEGRAM] Delivery error: {e}")
-        return False
+        raw_err = f"Telegram delivery failed: {type(e).__name__} - {str(e)}"
+        reason = sanitize_secret(raw_err, bot_token)
+        logging.error(f"[TELEGRAM] {reason}")
+        return False, reason
 
 # ============================================================
 # API ENDPOINTS
@@ -208,47 +244,70 @@ def health_check():
 def process_fall_event(event: FallEventRequest):
     logging.info(f"Received fall event payload from device '{event.device_id}' (Impact: {event.impact_g:.2f}g)")
 
-    # 1. Store Raw Fall Event in SQLite first
-    db_event_id = database.insert_raw_event(
-        device_id=event.device_id,
-        timestamp=event.timestamp,
-        impact_g=event.impact_g,
-        rotation_rads=event.rotation_rads,
-        posture_change_deg=event.posture_change_deg,
-        stillness_variation=event.stillness_variation,
-        fall_confidence=event.fall_confidence
-    )
+    db_event_id = None
+    try:
+        # 1. Store Raw Fall Event in SQLite first
+        db_event_id = database.insert_raw_event(
+            device_id=event.device_id,
+            timestamp=event.timestamp,
+            impact_g=event.impact_g,
+            rotation_rads=event.rotation_rads,
+            posture_change_deg=event.posture_change_deg,
+            stillness_variation=event.stillness_variation,
+            fall_confidence=event.fall_confidence
+        )
 
-    # 2. Run Gemini AI Assessment (or fallback)
-    assessment = analyze_fall_with_gemini(event)
+        # 2. Run Gemini AI Assessment (or fallback)
+        assessment = analyze_fall_with_gemini(event)
 
-    # 3. Update Database with Gemini Result
-    database.update_event_gemini(
-        event_id=db_event_id,
-        severity=assessment.get("severity", "UNKNOWN"),
-        assessment=assessment.get("assessment", ""),
-        caregiver_message=assessment.get("caregiver_message", ""),
-        recommended_action=assessment.get("recommended_action", ""),
-        alert_status="assessed"
-    )
+        # 3. Update Database with Gemini Result
+        database.update_event_gemini(
+            event_id=db_event_id,
+            severity=assessment.get("severity", "UNKNOWN"),
+            assessment=assessment.get("assessment", ""),
+            caregiver_message=assessment.get("caregiver_message", ""),
+            recommended_action=assessment.get("recommended_action", ""),
+            alert_status="assessed"
+        )
 
-    # 4. Dispatch Telegram Alert
-    telegram_delivered = send_telegram_alert(event, assessment)
+        # 4. Dispatch Telegram Alert
+        telegram_delivered, tg_failure_reason = send_telegram_alert(event, assessment)
 
-    # 5. Update Database with Telegram Status
-    alert_status = "alert_sent" if telegram_delivered else "alert_failed_or_skipped"
-    database.update_event_telegram(
-        event_id=db_event_id,
-        telegram_delivered=telegram_delivered,
-        alert_status=alert_status
-    )
+        # 5. Update Database with Telegram Status & Failure Reason
+        if telegram_delivered:
+            alert_status = "SENT"
+            failure_reason = None
+        else:
+            alert_status = "FAILED"
+            failure_reason = tg_failure_reason or "Telegram delivery failed"
 
-    return FallEventResponse(
-        event_id=str(db_event_id),
-        status="processed",
-        telegram_delivered=telegram_delivered,
-        gemini_assessment=assessment
-    )
+        database.update_event_telegram(
+            event_id=db_event_id,
+            telegram_delivered=telegram_delivered,
+            alert_status=alert_status,
+            failure_reason=failure_reason
+        )
+
+        return FallEventResponse(
+            event_id=str(db_event_id),
+            status="processed",
+            telegram_delivered=telegram_delivered,
+            gemini_assessment=assessment
+        )
+    except Exception as e:
+        safe_error = sanitize_secret(f"Alert processing failed: {type(e).__name__} - {str(e)}")
+        logging.error(f"[PIPELINE ERROR] {safe_error}")
+        if db_event_id:
+            database.update_event_failure(
+                event_id=db_event_id,
+                alert_status="FAILED",
+                failure_reason=safe_error
+            )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=safe_error
+        )
+
 
 @app.get("/api/events", response_model=EventHistoryResponse)
 def get_event_history(
@@ -257,6 +316,13 @@ def get_event_history(
 ):
     events = database.get_events(limit=limit, device_id=device_id)
     return EventHistoryResponse(events=events)
+
+@app.get("/api/dashboard/latest")
+def get_dashboard_latest():
+    latest = database.get_latest_event()
+    if not latest:
+        return {"event": None}
+    return latest
 
 @app.get("/api/events/{event_id}")
 def get_single_event(event_id: int):
@@ -268,6 +334,13 @@ def get_single_event(event_id: int):
         )
     return event_record
 
+# Mount static files for browser dashboard
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if not os.path.exists(static_dir):
+    os.makedirs(static_dir, exist_ok=True)
+app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+

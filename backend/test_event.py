@@ -70,10 +70,11 @@ def test_case_c_telegram_unavailable():
         "caregiver_message": "Test caregiver message",
         "recommended_action": "Test action"
     }
-    delivered = send_telegram_alert(sample_request, dummy_assessment, override_bot_token="123456:INVALID_TOKEN_XYZ", override_chat_id="999999")
+    res = send_telegram_alert(sample_request, dummy_assessment, override_bot_token="123456:INVALID_TOKEN_XYZ", override_chat_id="999999")
+    delivered = res[0] if isinstance(res, tuple) else res
     print(f"Telegram Delivery Status with Invalid Token: {delivered}")
     
-    resp = httpx.post(f"{BACKEND_URL}/api/fall-event", json=sample_request.model_dump(), timeout=10.0)
+    resp = httpx.post(f"{BACKEND_URL}/api/fall-event", json=sample_request.model_dump(), timeout=30.0)
     print(f"Backend API Response Code: {resp.status_code}")
     res_data = resp.json()
     print("Backend Response Payload:", res_data)
@@ -104,7 +105,7 @@ def test_case_a_valid_event_storage():
     }
 
     try:
-        resp = httpx.post(f"{BACKEND_URL}/api/fall-event", json=payload, timeout=10.0)
+        resp = httpx.post(f"{BACKEND_URL}/api/fall-event", json=payload, timeout=30.0)
         print(f"Response HTTP Code: {resp.status_code}")
         result = resp.json()
         print("Fall Event Response JSON:")

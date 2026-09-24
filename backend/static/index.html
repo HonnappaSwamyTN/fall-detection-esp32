@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fall Detection Monitor | ESP32-C3 System</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- HEADER -->
+        <header class="app-header">
+            <div class="header-branding">
+                <div class="header-icon-box">
+                    <svg class="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                        <path d="M12 8v4"/>
+                        <path d="M12 16h.01"/>
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="header-title">FALL DETECTION MONITOR</h1>
+                    <p class="header-subtitle">ESP32-C3 Wearable Safety Monitoring System</p>
+                </div>
+            </div>
+            <div class="header-status">
+                <span id="backend-badge" class="badge badge-offline">
+                    <span class="dot"></span> BACKEND OFFLINE
+                </span>
+            </div>
+        </header>
+
+        <!-- DEVICE STATUS BAR -->
+        <section class="status-grid">
+            <div class="status-card">
+                <span class="status-label">Device</span>
+                <span id="status-device" class="status-value highlight-cyan">ESP32C3_01</span>
+            </div>
+            <div class="status-card">
+                <span class="status-label">Backend</span>
+                <span id="status-backend" class="status-value state-offline">OFFLINE</span>
+            </div>
+            <div class="status-card">
+                <span class="status-label">Last Event</span>
+                <span id="status-lastevent" class="status-value">--</span>
+            </div>
+            <div class="status-card">
+                <span class="status-label">Database</span>
+                <span id="status-database" class="status-value state-offline">DISCONNECTED</span>
+            </div>
+        </section>
+
+        <!-- SENSOR PARAMETERS -->
+        <section class="section-container">
+            <h2 class="section-title">Kinematic Sensor Parameters</h2>
+            <div class="telemetry-grid">
+                <div class="metric-card" id="card-box-impact">
+                    <div class="metric-header">
+                        <span class="metric-title">Impact</span>
+                        <span class="metric-unit">g</span>
+                    </div>
+                    <div id="card-impact" class="metric-value">--</div>
+                    <div class="metric-footer">Acceleration Peak</div>
+                </div>
+
+                <div class="metric-card" id="card-box-rotation">
+                    <div class="metric-header">
+                        <span class="metric-title">Rotation</span>
+                        <span class="metric-unit">rad/s</span>
+                    </div>
+                    <div id="card-rotation" class="metric-value">--</div>
+                    <div class="metric-footer">Angular Velocity</div>
+                </div>
+
+                <div class="metric-card" id="card-box-posture">
+                    <div class="metric-header">
+                        <span class="metric-title">Posture Change</span>
+                        <span class="metric-unit">deg</span>
+                    </div>
+                    <div id="card-posture" class="metric-value">--</div>
+                    <div class="metric-footer">Orientation Shift</div>
+                </div>
+
+                <div class="metric-card" id="card-box-stillness">
+                    <div class="metric-header">
+                        <span class="metric-title">Stillness Variation</span>
+                        <span class="metric-unit">m/s²</span>
+                    </div>
+                    <div id="card-stillness" class="metric-value">--</div>
+                    <div class="metric-footer">Post-Impact Motion</div>
+                </div>
+
+                <div class="metric-card" id="card-box-confidence">
+                    <div class="metric-header">
+                        <span class="metric-title">Fall Confidence</span>
+                        <span class="metric-unit">%</span>
+                    </div>
+                    <div id="card-confidence" class="metric-value metric-accent">--</div>
+                    <div class="metric-footer">Hardware Score</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ALERT / SYSTEM STATUS PANEL -->
+        <section class="section-container">
+            <div id="alert-panel-container">
+                <!-- NORMAL STATE PANEL -->
+                <div id="normal-status-panel" class="status-banner banner-normal">
+                    <div class="banner-icon-container">
+                        <svg class="banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                            <polyline points="22 4 12 14.01 9 11.01"/>
+                        </svg>
+                    </div>
+                    <div class="banner-content">
+                        <h3 class="banner-title">SYSTEM STATUS</h3>
+                        <p class="banner-subtext">No recent fall event detected.</p>
+                    </div>
+                </div>
+
+                <!-- FALL ALERT PANEL -->
+                <div id="fall-alert-panel" class="alert-panel banner-alert hidden">
+                    <div class="alert-panel-header">
+                        <div class="alert-title-wrap">
+                            <span class="alert-pulse-dot"></span>
+                            <h3 class="alert-header-text">🚨 FALL DETECTED</h3>
+                        </div>
+                        <div class="alert-header-badges">
+                            <span id="alert-status-badge" class="badge-status">Status: --</span>
+                            <span id="alert-severity-badge" class="badge-severity">SEVERITY: --</span>
+                            <span id="alert-telegram-badge" class="badge-telegram">Telegram: --</span>
+                        </div>
+                    </div>
+
+                    <div class="alert-grid">
+                        <div class="alert-telemetry-summary">
+                            <h4 class="alert-subsection-title">Telemetry Overview</h4>
+                            <div class="telemetry-compact-list">
+                                <div class="t-item"><span class="t-label">Detection Time:</span> <span id="alert-time" class="t-val">--</span></div>
+                                <div class="t-item"><span class="t-label">Confidence:</span> <span id="alert-confidence" class="t-val highlight">--</span></div>
+                                <div class="t-item"><span class="t-label">Impact:</span> <span id="alert-impact" class="t-val">--</span></div>
+                                <div class="t-item"><span class="t-label">Rotation:</span> <span id="alert-rotation" class="t-val">--</span></div>
+                                <div class="t-item"><span class="t-label">Posture Shift:</span> <span id="alert-posture" class="t-val">--</span></div>
+                                <div class="t-item"><span class="t-label">Stillness Var:</span> <span id="alert-stillness" class="t-val">--</span></div>
+                            </div>
+                        </div>
+
+                        <div class="alert-ai-details">
+                            <div class="ai-box">
+                                <div class="ai-box-header">
+                                    <svg class="ai-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z"/>
+                                        <path d="M12 6v6l4 2"/>
+                                    </svg>
+                                    <span>Gemini Assessment</span>
+                                </div>
+                                <p id="alert-gemini-assessment" class="ai-box-text">--</p>
+                            </div>
+
+                            <div class="ai-box">
+                                <div class="ai-box-header">
+                                    <svg class="ai-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                                    </svg>
+                                    <span>Caregiver Message</span>
+                                </div>
+                                <p id="alert-caregiver-message" class="ai-box-text">--</p>
+                            </div>
+
+                            <div class="ai-box">
+                                <div class="ai-box-header">
+                                    <svg class="ai-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="9 11 12 14 22 4"/>
+                                        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                                    </svg>
+                                    <span>Recommended Action</span>
+                                </div>
+                                <p id="alert-recommended-action" class="ai-box-text">--</p>
+                            </div>
+
+                            <div id="alert-failure-reason-box" class="ai-box ai-box-failure hidden">
+                                <div class="ai-box-header header-failure">
+                                    <svg class="ai-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="10"/>
+                                        <line x1="12" y1="8" x2="12" y2="12"/>
+                                        <line x1="12" y1="16" x2="12.01" y2="16"/>
+                                    </svg>
+                                    <span>Failure Reason</span>
+                                </div>
+                                <p id="alert-failure-reason" class="ai-box-text text-failure">--</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- EVENT HISTORY -->
+        <section class="section-container">
+            <div class="section-header-wrap">
+                <h2 class="section-title">Recent Event History</h2>
+                <span class="table-subtitle">Showing latest 10 events</span>
+            </div>
+            <div class="table-card">
+                <div class="table-responsive">
+                    <table class="history-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Device</th>
+                                <th>Impact</th>
+                                <th>Rotation</th>
+                                <th>Posture</th>
+                                <th>Confidence</th>
+                                <th>Severity</th>
+                                <th>Alert Status</th>
+                                <th>Failure Reason</th>
+                            </tr>
+                        </thead>
+                        <tbody id="history-table-body">
+                            <tr>
+                                <td colspan="9" class="text-center">Loading event history...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- FOOTER -->
+        <footer class="app-footer">
+            <p>ESP32-C3 Wearable Safety System &bull; Live Telemetry & Monitoring Dashboard</p>
+        </footer>
+    </div>
+
+    <script src="dashboard.js"></script>
+</body>
+</html>
